@@ -1,7 +1,5 @@
 use crate::game::character::{Character, Status, write_character};
-use crate::game::injection::PatchState;
 use crate::game::inventory::{Inventory, write_inventory};
-use crate::game::redraw::nudge_redraw;
 use crate::memory::access::MemoryAccess;
 
 const HEADING_COLOR: egui::Color32 = egui::Color32::from_rgb(100, 220, 180);
@@ -9,13 +7,15 @@ const HEAL_FILL: egui::Color32 = egui::Color32::from_rgb(35, 100, 55);
 const INV_FILL: egui::Color32 = egui::Color32::from_rgb(110, 85, 35);
 const BTN_TEXT: egui::Color32 = egui::Color32::from_rgb(230, 230, 230);
 
+/// Returns `true` if any game memory was written.
 pub fn show(
     ui: &mut egui::Ui,
     party: &mut [Character],
     inventory: &mut Inventory,
     mem: Option<(&dyn MemoryAccess, usize)>,
-    patch: Option<&PatchState>,
-) {
+) -> bool {
+    let mut wrote = false;
+
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         ui.label(egui::RichText::new("⚡").heading());
@@ -43,10 +43,8 @@ pub fn show(
             ch.status = Status::Good;
             if let Some((mem, base)) = mem {
                 let _ = write_character(mem, base, ch);
+                wrote = true;
             }
-        }
-        if let Some((mem, base)) = mem {
-            let _ = nudge_redraw(mem, base, patch);
         }
     }
 
@@ -64,11 +62,9 @@ pub fn show(
                 ch.status = Status::Good;
                 if let Some((mem, base)) = mem {
                     let _ = write_character(mem, base, ch);
+                    wrote = true;
                 }
             }
-        }
-        if let Some((mem, base)) = mem {
-            let _ = nudge_redraw(mem, base, patch);
         }
     }
 
@@ -87,11 +83,9 @@ pub fn show(
                 ch.hp = ch.max_hp;
                 if let Some((mem, base)) = mem {
                     let _ = write_character(mem, base, ch);
+                    wrote = true;
                 }
             }
-        }
-        if let Some((mem, base)) = mem {
-            let _ = nudge_redraw(mem, base, patch);
         }
     }
 
@@ -109,7 +103,7 @@ pub fn show(
         inventory.gold = 9999;
         if let Some((mem, base)) = mem {
             let _ = write_inventory(mem, base, inventory);
-            let _ = nudge_redraw(mem, base, patch);
+            wrote = true;
         }
     }
 
@@ -125,7 +119,7 @@ pub fn show(
         inventory.food = 9999;
         if let Some((mem, base)) = mem {
             let _ = write_inventory(mem, base, inventory);
-            let _ = nudge_redraw(mem, base, patch);
+            wrote = true;
         }
     }
 
@@ -141,7 +135,7 @@ pub fn show(
         inventory.arrows = 99;
         if let Some((mem, base)) = mem {
             let _ = write_inventory(mem, base, inventory);
-            let _ = nudge_redraw(mem, base, patch);
+            wrote = true;
         }
     }
 
@@ -157,7 +151,9 @@ pub fn show(
         inventory.reagents = [99; 8];
         if let Some((mem, base)) = mem {
             let _ = write_inventory(mem, base, inventory);
-            let _ = nudge_redraw(mem, base, patch);
+            wrote = true;
         }
     }
+
+    wrote
 }

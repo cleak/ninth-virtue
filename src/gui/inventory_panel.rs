@@ -12,11 +12,12 @@ fn colored_heading(ui: &mut egui::Ui, emoji: &str, text: &str, color: egui::Colo
     });
 }
 
+/// Returns `true` if inventory was written to game memory.
 pub fn show_resources(
     ui: &mut egui::Ui,
     inventory: &mut Inventory,
     mem: Option<(&dyn MemoryAccess, usize)>,
-) {
+) -> bool {
     let mut changed = false;
 
     colored_heading(ui, "🎒", "Resources", RESOURCE_HEADING);
@@ -90,14 +91,17 @@ pub fn show_resources(
 
     if changed && let Some((mem, dos_base)) = mem {
         let _ = write_inventory(mem, dos_base, inventory);
+        return true;
     }
+    false
 }
 
+/// Returns `true` if inventory was written to game memory.
 pub fn show_reagents(
     ui: &mut egui::Ui,
     inventory: &mut Inventory,
     mem: Option<(&dyn MemoryAccess, usize)>,
-) {
+) -> bool {
     let mut changed = false;
 
     colored_heading(ui, "🧪", "Reagents", REAGENT_HEADING);
@@ -119,5 +123,7 @@ pub fn show_reagents(
 
     if changed && let Some((mem, dos_base)) = mem {
         let _ = write_inventory(mem, dos_base, inventory);
+        return true;
     }
+    false
 }

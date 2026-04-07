@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use crate::game::character::{Character, read_party};
 use crate::game::injection::{self, PatchState};
 use crate::game::inventory::{Inventory, read_inventory};
+use crate::game::redraw::nudge_redraw;
 use crate::gui;
 use crate::gui::memory_watch_panel::MemoryWatch;
 use crate::memory::access::MemoryAccess;
@@ -346,10 +347,12 @@ impl eframe::App for UltimaCompanion {
         // --- Memory watch window ---
         gui::memory_watch_panel::show(ctx, memory_watch, mem);
 
+        let mut game_written = false;
+
         egui::CentralPanel::default().show(ctx, |ui| {
             gui::section_frame(ui).show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                gui::party_panel::show(ui, party, mem);
+                game_written |= gui::party_panel::show(ui, party, mem);
             });
 
             ui.add_space(4.0);
@@ -357,17 +360,23 @@ impl eframe::App for UltimaCompanion {
             ui.columns(3, |cols| {
                 gui::section_frame(&cols[0]).show(&mut cols[0], |ui| {
                     ui.set_min_size(ui.available_size());
-                    gui::inventory_panel::show_resources(ui, inventory, mem);
+                    game_written |= gui::inventory_panel::show_resources(ui, inventory, mem);
                 });
                 gui::section_frame(&cols[1]).show(&mut cols[1], |ui| {
                     ui.set_min_size(ui.available_size());
-                    gui::inventory_panel::show_reagents(ui, inventory, mem);
+                    game_written |= gui::inventory_panel::show_reagents(ui, inventory, mem);
                 });
                 gui::section_frame(&cols[2]).show(&mut cols[2], |ui| {
                     ui.set_min_size(ui.available_size());
-                    gui::actions_panel::show(ui, party, inventory, mem, patch_state.as_ref());
+                    game_written |= gui::actions_panel::show(ui, party, inventory, mem);
                 });
             });
         });
+
+        // After all panels have run, trigger a single redraw if any
+        // panel wrote to game memory.
+        if game_written && let (Some(mem), Some(patch)) = (mem, patch_state.as_ref()) {
+            let _ = nudge_redraw(mem.0, mem.1, Some(patch));
+        }
     }
 }
