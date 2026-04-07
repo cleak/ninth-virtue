@@ -13,11 +13,15 @@ pub fn show(
     inventory: &mut Inventory,
     mem: Option<(&dyn MemoryAccess, usize)>,
 ) {
-    ui.label(
-        egui::RichText::new("Quick Actions")
-            .heading()
-            .color(HEADING_COLOR),
-    );
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.label(egui::RichText::new("⚡").heading());
+        ui.label(
+            egui::RichText::new("Quick Actions")
+                .heading()
+                .color(HEADING_COLOR),
+        );
+    });
 
     let enabled = mem.is_some();
     let button_size = egui::vec2(ui.available_width(), 24.0);
@@ -25,7 +29,7 @@ pub fn show(
     if ui
         .add_enabled(
             enabled,
-            egui::Button::new(egui::RichText::new("Heal All").color(BTN_TEXT))
+            egui::Button::new(egui::RichText::new("💚 Heal All").color(BTN_TEXT))
                 .fill(HEAL_FILL)
                 .min_size(button_size),
         )
@@ -43,7 +47,7 @@ pub fn show(
     if ui
         .add_enabled(
             enabled,
-            egui::Button::new(egui::RichText::new("Cure Poison").color(BTN_TEXT))
+            egui::Button::new(egui::RichText::new("✚ Cure Poison").color(BTN_TEXT))
                 .fill(HEAL_FILL)
                 .min_size(button_size),
         )
@@ -62,7 +66,7 @@ pub fn show(
     if ui
         .add_enabled(
             enabled,
-            egui::Button::new(egui::RichText::new("Resurrect All").color(BTN_TEXT))
+            egui::Button::new(egui::RichText::new("✨ Resurrect All").color(BTN_TEXT))
                 .fill(HEAL_FILL)
                 .min_size(button_size),
         )
@@ -84,7 +88,7 @@ pub fn show(
     if ui
         .add_enabled(
             enabled,
-            egui::Button::new(egui::RichText::new("Max Gold").color(BTN_TEXT))
+            egui::Button::new(egui::RichText::new("💰 Max Gold").color(BTN_TEXT))
                 .fill(INV_FILL)
                 .min_size(button_size),
         )
@@ -99,7 +103,7 @@ pub fn show(
     if ui
         .add_enabled(
             enabled,
-            egui::Button::new(egui::RichText::new("Max Food").color(BTN_TEXT))
+            egui::Button::new(egui::RichText::new("🍖 Max Food").color(BTN_TEXT))
                 .fill(INV_FILL)
                 .min_size(button_size),
         )
@@ -129,7 +133,7 @@ pub fn show(
     if ui
         .add_enabled(
             enabled,
-            egui::Button::new(egui::RichText::new("Max Reagents").color(BTN_TEXT))
+            egui::Button::new(egui::RichText::new("⚗ Max Reagents").color(BTN_TEXT))
                 .fill(INV_FILL)
                 .min_size(button_size),
         )

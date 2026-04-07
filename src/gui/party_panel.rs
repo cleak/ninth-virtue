@@ -9,11 +9,15 @@ pub fn show(ui: &mut egui::Ui, party: &mut [Character], mem: Option<(&dyn Memory
         return;
     }
 
-    ui.label(
-        egui::RichText::new("Party")
-            .heading()
-            .color(egui::Color32::from_rgb(100, 180, 255)),
-    );
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.label(egui::RichText::new("⚔").heading());
+        ui.label(
+            egui::RichText::new("Party")
+                .heading()
+                .color(egui::Color32::from_rgb(100, 180, 255)),
+        );
+    });
 
     TableBuilder::new(ui)
         .column(Column::auto().at_least(70.0)) // Name

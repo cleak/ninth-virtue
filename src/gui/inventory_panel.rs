@@ -3,7 +3,14 @@ use crate::memory::access::MemoryAccess;
 
 const RESOURCE_HEADING: egui::Color32 = egui::Color32::from_rgb(255, 200, 80);
 const REAGENT_HEADING: egui::Color32 = egui::Color32::from_rgb(180, 140, 255);
-const LABEL_COLOR: egui::Color32 = egui::Color32::from_rgb(180, 190, 210);
+
+fn colored_heading(ui: &mut egui::Ui, emoji: &str, text: &str, color: egui::Color32) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.label(egui::RichText::new(emoji).heading());
+        ui.label(egui::RichText::new(text).heading().color(color));
+    });
+}
 
 pub fn show_resources(
     ui: &mut egui::Ui,
@@ -12,16 +19,12 @@ pub fn show_resources(
 ) {
     let mut changed = false;
 
-    ui.label(
-        egui::RichText::new("Resources")
-            .heading()
-            .color(RESOURCE_HEADING),
-    );
+    colored_heading(ui, "🎒", "Resources", RESOURCE_HEADING);
     egui::Grid::new("inv_resources")
         .num_columns(2)
         .spacing([8.0, 4.0])
         .show(ui, |ui| {
-            ui.label(egui::RichText::new("Food:").color(LABEL_COLOR));
+            ui.label("🍖 Food:");
             if ui
                 .add(egui::DragValue::new(&mut inventory.food).range(0..=9999))
                 .changed()
@@ -30,7 +33,7 @@ pub fn show_resources(
             }
             ui.end_row();
 
-            ui.label(egui::RichText::new("Gold:").color(LABEL_COLOR));
+            ui.label("💰 Gold:");
             if ui
                 .add(egui::DragValue::new(&mut inventory.gold).range(0..=9999))
                 .changed()
@@ -39,7 +42,7 @@ pub fn show_resources(
             }
             ui.end_row();
 
-            ui.label(egui::RichText::new("Keys:").color(LABEL_COLOR));
+            ui.label("🔑 Keys:");
             if ui
                 .add(egui::DragValue::new(&mut inventory.keys).range(0..=255))
                 .changed()
@@ -48,7 +51,7 @@ pub fn show_resources(
             }
             ui.end_row();
 
-            ui.label(egui::RichText::new("Gems:").color(LABEL_COLOR));
+            ui.label("💎 Gems:");
             if ui
                 .add(egui::DragValue::new(&mut inventory.gems).range(0..=255))
                 .changed()
@@ -57,7 +60,7 @@ pub fn show_resources(
             }
             ui.end_row();
 
-            ui.label(egui::RichText::new("Torches:").color(LABEL_COLOR));
+            ui.label("🔥 Torches:");
             if ui
                 .add(egui::DragValue::new(&mut inventory.torches).range(0..=255))
                 .changed()
@@ -66,7 +69,7 @@ pub fn show_resources(
             }
             ui.end_row();
 
-            ui.label(egui::RichText::new("Arrows:").color(LABEL_COLOR));
+            ui.label("Arrows:");
             if ui
                 .add(egui::DragValue::new(&mut inventory.arrows).range(0..=255))
                 .changed()
@@ -75,7 +78,7 @@ pub fn show_resources(
             }
             ui.end_row();
 
-            ui.label(egui::RichText::new("Karma:").color(LABEL_COLOR));
+            ui.label("☯ Karma:");
             if ui
                 .add(egui::DragValue::new(&mut inventory.karma).range(0..=255))
                 .changed()
@@ -97,17 +100,13 @@ pub fn show_reagents(
 ) {
     let mut changed = false;
 
-    ui.label(
-        egui::RichText::new("Reagents")
-            .heading()
-            .color(REAGENT_HEADING),
-    );
+    colored_heading(ui, "⚗", "Reagents", REAGENT_HEADING);
     egui::Grid::new("inv_reagents")
         .num_columns(2)
         .spacing([8.0, 4.0])
         .show(ui, |ui| {
             for (i, name) in REAGENT_NAMES.iter().enumerate() {
-                ui.label(egui::RichText::new(*name).color(LABEL_COLOR));
+                ui.label(*name);
                 if ui
                     .add(egui::DragValue::new(&mut inventory.reagents[i]).range(0..=99))
                     .changed()
