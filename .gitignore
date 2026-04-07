@@ -1,0 +1,19 @@
+# Build artifacts
+/target
+debug/
+*.pdb
+
+# Cargo
+Cargo.lock
+
+# Editor/IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
