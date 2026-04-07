@@ -281,6 +281,7 @@ impl eframe::App for UltimaCompanion {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             gui::section_frame(ui).show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
                 gui::party_panel::show(ui, party, mem);
             });
 
@@ -288,12 +289,15 @@ impl eframe::App for UltimaCompanion {
 
             ui.columns(3, |cols| {
                 gui::section_frame(&cols[0]).show(&mut cols[0], |ui| {
+                    ui.set_min_size(ui.available_size());
                     gui::inventory_panel::show_resources(ui, inventory, mem);
                 });
                 gui::section_frame(&cols[1]).show(&mut cols[1], |ui| {
+                    ui.set_min_size(ui.available_size());
                     gui::inventory_panel::show_reagents(ui, inventory, mem);
                 });
                 gui::section_frame(&cols[2]).show(&mut cols[2], |ui| {
+                    ui.set_min_size(ui.available_size());
                     gui::actions_panel::show(ui, party, inventory, mem);
                 });
             });
