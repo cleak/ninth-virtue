@@ -87,7 +87,7 @@ fn main() {
     // Phase 1: Baseline — identify noisy addresses
     // ================================================================
     wait_for_enter("Press ENTER to start baseline capture (keep the game IDLE)...");
-    eprintln!("Capturing baseline... press ENTER again to stop.");
+    eprintln!("Capturing baseline for 5 seconds...");
 
     let mut noisy: HashSet<usize> = HashSet::new();
     let mut prev = snapshot(mem, dos_base);

@@ -3,7 +3,6 @@ use std::time::{Duration, Instant};
 use crate::game::character::{Character, read_party};
 use crate::game::injection::{self, PatchState};
 use crate::game::inventory::{Inventory, read_inventory};
-use crate::game::redraw::nudge_redraw;
 use crate::gui;
 use crate::gui::memory_watch_panel::MemoryWatch;
 use crate::memory::access::MemoryAccess;
@@ -375,8 +374,8 @@ impl eframe::App for UltimaCompanion {
 
         // After all panels have run, trigger a single redraw if any
         // panel wrote to game memory.
-        if game_written && let (Some(mem), Some(patch)) = (mem, patch_state.as_ref()) {
-            let _ = nudge_redraw(mem.0, mem.1, Some(patch));
+        if game_written && let (Some((mem, _)), Some(patch)) = (mem, patch_state.as_ref()) {
+            let _ = injection::trigger_redraw(mem, patch);
         }
     }
 }

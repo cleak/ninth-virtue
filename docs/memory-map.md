@@ -38,13 +38,14 @@ otherwise noted.
 |------------|-----------|-------------|
 | `cs_base + 0x0000` | `0x0000` | Program entry point / `main()` |
 | `cs_base + 0x00B8` | `0x00B8` | Main game loop top |
-| `cs_base + 0x0174` | `0x0174` | Main loop backward jump (**patch point**) |
+| `cs_base + 0x0174` | `0x0174` | Main loop backward jump (overlay dispatch) |
 | `cs_base + 0x16BA` | `0x16BA` | `putchar` — print one character |
 | `cs_base + 0x1850` | `0x1850` | `print_string` — print null-terminated string |
 | `cs_base + 0x1A3E` | `0x1A3E` | `print_number` — print number with width/pad |
+| `cs_base + 0x266C` | `0x266C` | `get_command` — wait for keyboard input |
+| `cs_base + 0x268C` | `0x268C` | `get_command` overlay entry (**hook point**) |
 | `cs_base + 0x2726` | `0x2726` | `draw_stats_row` — render one party member |
 | `cs_base + 0x2900` | `0x2900` | `redraw_full_stats` — **the target function** |
-| `cs_base + 0x266C` | `0x266C` | `get_command` — wait for keyboard input |
 | `cs_base + 0x3178` | `0x3178` | Overworld command dispatch (A-Z, 0-6) |
 | `cs_base + 0x4080` | `0x4080` | Set active player handler |
 
@@ -124,8 +125,7 @@ Character N base: save offset `0x02 + N * 0x20`.
 
 | Save Offset | DS Offset | Description |
 |-------------|-----------|-------------|
-| TBD | TBD | Redraw dirty flag — set to 1 by companion app, checked and cleared by injected code cave |
+| `0x3C0` | `0x5966` | Redraw dirty flag — set to 1 by companion app, checked and cleared by injected code cave |
 
-The exact offset will be chosen during implementation from an unused
-byte in the save-data area (candidates: `0x2E3`, `0x2E4`, or a byte
-past `0x1060`).
+This offset is past the end of the on-disk save file (which ends
+around `0x3B2`) but within the runtime-only RAM region.

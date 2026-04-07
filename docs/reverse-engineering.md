@@ -299,25 +299,27 @@ at `dos_base + 0x41E` (bypassing SendInput/host OS entirely).
 
 ---
 
-## Chosen Approach: Main Loop Code Patch
+## Chosen Approach: `get_command` Hook via Code Cave
 
-See [docs/redraw-mechanism.md](redraw-mechanism.md) for the full
-implementation design.
+See [redraw-mechanism.md](redraw-mechanism.md) for the full design.
 
-**Summary:** Patch the main game loop's backward jump at `CS:0x0174` to
-detour through a small code cave that checks a dirty flag byte. When
-our app writes 1 to the flag, the game calls `0x2900` on its next loop
-iteration — in its normal execution context, with zero side effects.
+**Summary:** Hook the overlay's entry into `get_command` at `CS:0x268C`
+with a JMP to a 23-byte code cave. The cave checks a dirty flag byte
+at `DS:0x5966` (save offset `0x3C0`); when set, it clears the flag and
+calls `redraw_full_stats` before proceeding to the real function.
+
+### Key Discovery: Overlay Segment Offset
+
+The main loop at `CS:0x00B8-0x0174` was our first patch target, but it
+never fires during gameplay — the overlay manager redirects execution
+into overlay segment `0x0FC6` which has its own inner loop. The overlay
+segment is 2 paragraphs (32 bytes) above CS (`0x0FC4`), so overlay code
+calling `get_command` at offset `0x266C` actually enters `CS:0x268C`.
 
 ### Why This Works
 
-1. **No reentrancy risk** — the redraw runs in the game's own main loop
-   context, not from an interrupt.
-2. **No visible side effects** — we call `0x2900` directly, skipping
-   the "Set Active Plr" message that the keyboard handler prints.
-3. **Works in any game mode** — the main loop runs regardless of
-   whether the game is in overworld, town, dungeon, or combat.
-4. **DOSBox compatible** — real-mode games use the interpreter core
-   (not JIT), so code patches via `WriteProcessMemory` take effect
-   immediately.
-5. **Reversible** — we can restore the original bytes to unpatch.
+1. **No reentrancy risk** — runs in the game's normal input-poll context.
+2. **No visible side effects** — calls `0x2900` directly, no messages.
+3. **Works in any game mode** — `get_command` is called from every overlay.
+4. **DOSBox compatible** — real-mode interpreter core, no JIT cache issues.
+5. **Reversible** — original bytes restored on detach.
