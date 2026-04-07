@@ -9,7 +9,11 @@ pub fn show(ui: &mut egui::Ui, party: &mut [Character], mem: Option<(&dyn Memory
         return;
     }
 
-    ui.heading("⚔️ Party");
+    ui.label(
+        egui::RichText::new("Party")
+            .heading()
+            .color(egui::Color32::from_rgb(100, 180, 255)),
+    );
 
     TableBuilder::new(ui)
         .column(Column::auto().at_least(70.0)) // Name
@@ -67,13 +71,13 @@ pub fn show(ui: &mut egui::Ui, party: &mut [Character], mem: Option<(&dyn Memory
                 let mut changed = false;
 
                 row.col(|ui| {
-                    let (icon, color) = match ch.status {
-                        Status::Dead => ("💀 ", egui::Color32::from_rgb(255, 100, 100)),
-                        Status::Poisoned => ("🤢 ", egui::Color32::from_rgb(255, 255, 100)),
-                        Status::Asleep => ("💤 ", egui::Color32::from_rgb(180, 180, 180)),
-                        Status::Good => ("", ui.visuals().text_color()),
+                    let color = match ch.status {
+                        Status::Dead => egui::Color32::from_rgb(255, 100, 100),
+                        Status::Poisoned => egui::Color32::from_rgb(255, 255, 100),
+                        Status::Asleep => egui::Color32::from_rgb(180, 180, 180),
+                        Status::Good => ui.visuals().text_color(),
                     };
-                    ui.colored_label(color, format!("{icon}{}", ch.name));
+                    ui.colored_label(color, &ch.name);
                 });
 
                 row.col(|ui| {

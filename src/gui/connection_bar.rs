@@ -21,13 +21,15 @@ pub fn show(
     ui.horizontal(|ui| {
         // Status indicator
         let (color, text) = if !is_attached {
-            (egui::Color32::from_rgb(200, 60, 60), "🔴 Disconnected")
+            (egui::Color32::from_rgb(200, 60, 60), "Disconnected")
         } else if game_confirmed {
-            (egui::Color32::from_rgb(60, 200, 60), "🟢 Connected")
+            (egui::Color32::from_rgb(60, 200, 60), "Connected")
         } else {
-            (egui::Color32::from_rgb(230, 200, 50), "🟡 DOS found")
+            (egui::Color32::from_rgb(230, 200, 50), "DOS found")
         };
 
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+        ui.painter().circle_filled(rect.center(), 6.0, color);
         ui.colored_label(color, text);
 
         if is_attached {

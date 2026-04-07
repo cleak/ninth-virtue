@@ -2,13 +2,22 @@ use crate::game::character::{Character, Status, write_character};
 use crate::game::inventory::{Inventory, write_inventory};
 use crate::memory::access::MemoryAccess;
 
+const HEADING_COLOR: egui::Color32 = egui::Color32::from_rgb(100, 220, 180);
+const HEAL_FILL: egui::Color32 = egui::Color32::from_rgb(35, 100, 55);
+const INV_FILL: egui::Color32 = egui::Color32::from_rgb(110, 85, 35);
+const BTN_TEXT: egui::Color32 = egui::Color32::from_rgb(230, 230, 230);
+
 pub fn show(
     ui: &mut egui::Ui,
     party: &mut [Character],
     inventory: &mut Inventory,
     mem: Option<(&dyn MemoryAccess, usize)>,
 ) {
-    ui.heading("⚡ Quick Actions");
+    ui.label(
+        egui::RichText::new("Quick Actions")
+            .heading()
+            .color(HEADING_COLOR),
+    );
 
     let enabled = mem.is_some();
     let button_size = egui::vec2(ui.available_width(), 24.0);
@@ -16,7 +25,9 @@ pub fn show(
     if ui
         .add_enabled(
             enabled,
-            egui::Button::new("💚 Heal All").min_size(button_size),
+            egui::Button::new(egui::RichText::new("Heal All").color(BTN_TEXT))
+                .fill(HEAL_FILL)
+                .min_size(button_size),
         )
         .clicked()
     {
@@ -32,7 +43,9 @@ pub fn show(
     if ui
         .add_enabled(
             enabled,
-            egui::Button::new("🩹 Cure Poison").min_size(button_size),
+            egui::Button::new(egui::RichText::new("Cure Poison").color(BTN_TEXT))
+                .fill(HEAL_FILL)
+                .min_size(button_size),
         )
         .clicked()
     {
@@ -49,7 +62,9 @@ pub fn show(
     if ui
         .add_enabled(
             enabled,
-            egui::Button::new("✨ Resurrect All").min_size(button_size),
+            egui::Button::new(egui::RichText::new("Resurrect All").color(BTN_TEXT))
+                .fill(HEAL_FILL)
+                .min_size(button_size),
         )
         .clicked()
     {
@@ -69,7 +84,9 @@ pub fn show(
     if ui
         .add_enabled(
             enabled,
-            egui::Button::new("💰 Max Gold").min_size(button_size),
+            egui::Button::new(egui::RichText::new("Max Gold").color(BTN_TEXT))
+                .fill(INV_FILL)
+                .min_size(button_size),
         )
         .clicked()
     {
@@ -82,7 +99,9 @@ pub fn show(
     if ui
         .add_enabled(
             enabled,
-            egui::Button::new("🍖 Max Food").min_size(button_size),
+            egui::Button::new(egui::RichText::new("Max Food").color(BTN_TEXT))
+                .fill(INV_FILL)
+                .min_size(button_size),
         )
         .clicked()
     {
@@ -95,7 +114,9 @@ pub fn show(
     if ui
         .add_enabled(
             enabled,
-            egui::Button::new("🏹 Refill Arrows").min_size(button_size),
+            egui::Button::new(egui::RichText::new("Refill Arrows").color(BTN_TEXT))
+                .fill(INV_FILL)
+                .min_size(button_size),
         )
         .clicked()
     {
@@ -108,7 +129,9 @@ pub fn show(
     if ui
         .add_enabled(
             enabled,
-            egui::Button::new("🧪 Max Reagents").min_size(button_size),
+            egui::Button::new(egui::RichText::new("Max Reagents").color(BTN_TEXT))
+                .fill(INV_FILL)
+                .min_size(button_size),
         )
         .clicked()
     {
