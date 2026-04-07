@@ -163,13 +163,10 @@ fn build_detail_image(
 
     for vy in 0..zoom {
         for vx in 0..zoom {
-            let wx = center_x as i32 - half + vx as i32;
-            let wy = center_y as i32 - half + vy as i32;
-            if wx < 0 || wy < 0 || wx > 255 || wy > 255 {
-                continue;
-            }
+            let wx = (center_x as i32 - half + vx as i32).rem_euclid(256) as u8;
+            let wy = (center_y as i32 - half + vy as i32).rem_euclid(256) as u8;
 
-            let tile_id = world.get_tile(wx as u8, wy as u8) as u16;
+            let tile_id = world.get_tile(wx, wy) as u16;
             let rgba = atlas.tile_rgba(tile_id);
 
             for py in 0..TILE_SIZE {
