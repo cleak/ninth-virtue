@@ -3,10 +3,16 @@ use egui_extras::{Column, TableBuilder};
 use crate::game::character::{Character, Status};
 use crate::memory::access::MemoryAccess;
 
-pub fn show(ui: &mut egui::Ui, party: &mut [Character], mem: Option<(&dyn MemoryAccess, usize)>) {
+/// Returns `true` if any character data was written to game memory.
+pub fn show(
+    ui: &mut egui::Ui,
+    party: &mut [Character],
+    mem: Option<(&dyn MemoryAccess, usize)>,
+) -> bool {
+    let mut wrote = false;
     if party.is_empty() {
         ui.label("No party data loaded.");
-        return;
+        return false;
     }
 
     ui.horizontal(|ui| {
@@ -176,8 +182,10 @@ pub fn show(ui: &mut egui::Ui, party: &mut [Character], mem: Option<(&dyn Memory
                     party[i] = ch;
                     if let Some((mem, dos_base)) = mem {
                         let _ = crate::game::character::write_character(mem, dos_base, &party[i]);
+                        wrote = true;
                     }
                 }
             });
         });
+    wrote
 }

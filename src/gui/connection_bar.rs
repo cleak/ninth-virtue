@@ -14,6 +14,7 @@ pub fn show(
     dos_base: Option<usize>,
     auto_refresh: &mut bool,
     refresh_interval: &mut f32,
+    show_memory_watch: &mut bool,
     status_msg: &str,
 ) -> ConnectionAction {
     let mut action = ConnectionAction::None;
@@ -51,6 +52,9 @@ pub fn show(
                         .suffix("s"),
                 );
             }
+
+            ui.separator();
+            ui.checkbox(show_memory_watch, "Watch");
         } else if !process_list.is_empty() {
             // Process picker -- only visible when not auto-attached
             // (multiple processes, or auto-attach suppressed after disconnect).

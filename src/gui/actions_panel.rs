@@ -7,12 +7,15 @@ const HEAL_FILL: egui::Color32 = egui::Color32::from_rgb(35, 100, 55);
 const INV_FILL: egui::Color32 = egui::Color32::from_rgb(110, 85, 35);
 const BTN_TEXT: egui::Color32 = egui::Color32::from_rgb(230, 230, 230);
 
+/// Returns `true` if any game memory was written.
 pub fn show(
     ui: &mut egui::Ui,
     party: &mut [Character],
     inventory: &mut Inventory,
     mem: Option<(&dyn MemoryAccess, usize)>,
-) {
+) -> bool {
+    let mut wrote = false;
+
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         ui.label(egui::RichText::new("⚡").heading());
@@ -40,6 +43,7 @@ pub fn show(
             ch.status = Status::Good;
             if let Some((mem, base)) = mem {
                 let _ = write_character(mem, base, ch);
+                wrote = true;
             }
         }
     }
@@ -58,6 +62,7 @@ pub fn show(
                 ch.status = Status::Good;
                 if let Some((mem, base)) = mem {
                     let _ = write_character(mem, base, ch);
+                    wrote = true;
                 }
             }
         }
@@ -78,6 +83,7 @@ pub fn show(
                 ch.hp = ch.max_hp;
                 if let Some((mem, base)) = mem {
                     let _ = write_character(mem, base, ch);
+                    wrote = true;
                 }
             }
         }
@@ -97,6 +103,7 @@ pub fn show(
         inventory.gold = 9999;
         if let Some((mem, base)) = mem {
             let _ = write_inventory(mem, base, inventory);
+            wrote = true;
         }
     }
 
@@ -112,6 +119,7 @@ pub fn show(
         inventory.food = 9999;
         if let Some((mem, base)) = mem {
             let _ = write_inventory(mem, base, inventory);
+            wrote = true;
         }
     }
 
@@ -127,6 +135,7 @@ pub fn show(
         inventory.arrows = 99;
         if let Some((mem, base)) = mem {
             let _ = write_inventory(mem, base, inventory);
+            wrote = true;
         }
     }
 
@@ -142,6 +151,9 @@ pub fn show(
         inventory.reagents = [99; 8];
         if let Some((mem, base)) = mem {
             let _ = write_inventory(mem, base, inventory);
+            wrote = true;
         }
     }
+
+    wrote
 }
