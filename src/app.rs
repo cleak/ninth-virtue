@@ -13,6 +13,12 @@ pub struct AttachedProcess {
     pub game_confirmed: bool,
 }
 
+/// How often to scan for DOSBox processes when not attached.
+const PROCESS_SCAN_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How often to rescan memory when attached but game not yet confirmed.
+const RESCAN_INTERVAL: Duration = Duration::from_secs(2);
+
 pub struct UltimaCompanion {
     // Connection state
     process_list: Vec<(u32, String)>,
@@ -23,6 +29,13 @@ pub struct UltimaCompanion {
     party: Vec<Character>,
     inventory: Inventory,
 
+    // Timing
+    last_process_scan: Instant,
+    last_rescan: Instant,
+
+    // After manual disconnect, suppress auto-attach until DOSBox exits.
+    suppress_auto_attach: bool,
+
     // UI state
     auto_refresh: bool,
     refresh_interval_secs: f32,
@@ -32,24 +45,40 @@ pub struct UltimaCompanion {
 
 impl UltimaCompanion {
     pub fn new() -> Self {
-        Self {
+        let mut app = Self {
             process_list: Vec::new(),
             selected_pid: None,
             attached: None,
             party: Vec::new(),
             inventory: Inventory::default(),
+            last_process_scan: Instant::now(),
+            last_rescan: Instant::now(),
+            suppress_auto_attach: false,
             auto_refresh: true,
             refresh_interval_secs: 1.0,
             last_refresh: Instant::now(),
-            status_msg: String::new(),
+            status_msg: "Searching for DOSBox...".to_string(),
+        };
+        // Scan immediately on startup so we connect without delay.
+        app.scan_processes();
+        if app.process_list.len() == 1 {
+            let pid = app.process_list[0].0;
+            app.attach(pid);
         }
+        app
     }
 
     fn scan_processes(&mut self) {
         match process::list_dosbox_processes() {
             Ok(list) => {
-                self.status_msg = format!("Found {} DOSBox process(es)", list.len());
-                if self.selected_pid.is_none() {
+                if list.is_empty() {
+                    self.suppress_auto_attach = false;
+                    if self.attached.is_none() {
+                        self.status_msg = "Searching for DOSBox...".to_string();
+                    }
+                }
+                // Reset selection if the current PID disappeared.
+                if !list.iter().any(|(p, _)| Some(*p) == self.selected_pid) {
                     self.selected_pid = list.first().map(|(pid, _)| *pid);
                 }
                 self.process_list = list;
@@ -58,6 +87,7 @@ impl UltimaCompanion {
                 self.status_msg = format!("Scan failed: {e}");
             }
         }
+        self.last_process_scan = Instant::now();
     }
 
     fn attach(&mut self, pid: u32) {
@@ -71,25 +101,26 @@ impl UltimaCompanion {
                     }
                 };
 
-                if let Some(base) = dos_base {
-                    self.status_msg = format!(
-                        "Attached to {} (PID {}), base={base:#x}{}",
-                        proc.name,
-                        proc.pid,
-                        if game_confirmed {
-                            ""
-                        } else {
-                            " (game not loaded)"
-                        }
-                    );
+                if dos_base.is_some() {
+                    if game_confirmed {
+                        self.status_msg =
+                            format!("Connected to {} (PID {})", proc.name, proc.pid,);
+                    } else {
+                        self.status_msg = "Waiting for game to load...".to_string();
+                    }
                 }
 
+                self.selected_pid = Some(pid);
                 self.attached = Some(AttachedProcess {
                     process: proc,
                     dos_base,
                     game_confirmed,
                 });
-                self.refresh_game_state();
+                self.last_rescan = Instant::now();
+
+                if game_confirmed {
+                    self.refresh_game_state();
+                }
             }
             Err(e) => {
                 self.status_msg = format!("Attach failed: {e}");
@@ -101,6 +132,7 @@ impl UltimaCompanion {
         self.attached = None;
         self.party.clear();
         self.inventory = Inventory::default();
+        self.suppress_auto_attach = true;
         self.status_msg = "Disconnected".to_string();
     }
 
@@ -112,20 +144,18 @@ impl UltimaCompanion {
             Ok(result) => {
                 attached.dos_base = Some(result.dos_base);
                 attached.game_confirmed = result.game_confirmed;
-                self.status_msg = format!(
-                    "Rescan: base={:#x}{}",
-                    result.dos_base,
-                    if result.game_confirmed {
-                        ""
-                    } else {
-                        " (game not loaded)"
-                    }
-                );
+                if result.game_confirmed {
+                    self.status_msg = format!(
+                        "Connected to {} (PID {})",
+                        attached.process.name, attached.process.pid,
+                    );
+                }
             }
             Err(e) => {
                 self.status_msg = format!("Rescan failed: {e}");
             }
         }
+        self.last_rescan = Instant::now();
     }
 
     fn refresh_game_state(&mut self) {
@@ -168,13 +198,43 @@ impl UltimaCompanion {
 
 impl eframe::App for UltimaCompanion {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Auto-refresh
-        if self.auto_refresh && self.attached.is_some() {
-            let interval = Duration::from_secs_f32(self.refresh_interval_secs);
-            if self.last_refresh.elapsed() >= interval {
-                self.refresh_game_state();
+        // --- Auto-management ---
+        if self.attached.is_none() {
+            // Periodically scan for DOSBox processes.
+            if self.last_process_scan.elapsed() >= PROCESS_SCAN_INTERVAL {
+                self.scan_processes();
+                // Auto-attach if exactly one process and not suppressed.
+                if !self.suppress_auto_attach && self.process_list.len() == 1 {
+                    let pid = self.process_list[0].0;
+                    self.attach(pid);
+                }
             }
-            ctx.request_repaint_after(interval);
+            ctx.request_repaint_after(PROCESS_SCAN_INTERVAL);
+        } else if !self.attached.as_ref().unwrap().process.is_alive() {
+            // Process died -- clean up.
+            self.attached = None;
+            self.party.clear();
+            self.inventory = Inventory::default();
+            self.status_msg = "Process terminated".to_string();
+        } else {
+            let game_confirmed = self.attached.as_ref().unwrap().game_confirmed;
+
+            if !game_confirmed {
+                // Attached but game not loaded: periodically rescan memory.
+                if self.last_rescan.elapsed() >= RESCAN_INTERVAL {
+                    self.rescan_memory();
+                    if self.attached.as_ref().is_some_and(|a| a.game_confirmed) {
+                        self.refresh_game_state();
+                    }
+                }
+                ctx.request_repaint_after(RESCAN_INTERVAL);
+            } else if self.auto_refresh {
+                let interval = Duration::from_secs_f32(self.refresh_interval_secs);
+                if self.last_refresh.elapsed() >= interval {
+                    self.refresh_game_state();
+                }
+                ctx.request_repaint_after(interval);
+            }
         }
 
         // --- Connection bar ---
@@ -198,10 +258,11 @@ impl eframe::App for UltimaCompanion {
         });
 
         match conn_action {
-            gui::connection_bar::ConnectionAction::ScanProcesses => self.scan_processes(),
-            gui::connection_bar::ConnectionAction::Attach(pid) => self.attach(pid),
+            gui::connection_bar::ConnectionAction::Attach(pid) => {
+                self.suppress_auto_attach = false;
+                self.attach(pid);
+            }
             gui::connection_bar::ConnectionAction::Detach => self.detach(),
-            gui::connection_bar::ConnectionAction::RescanMemory => self.rescan_memory(),
             gui::connection_bar::ConnectionAction::None => {}
         }
 
