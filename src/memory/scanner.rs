@@ -162,7 +162,7 @@ fn count_f000_segments(ivt: &[u8]) -> usize {
 
 /// Validate the Interrupt Vector Table by counting entries with segment == 0xF000 (ROM BIOS).
 #[cfg(test)]
-pub fn validate_ivt(ivt: &[u8]) -> bool {
+fn validate_ivt(ivt: &[u8]) -> bool {
     if ivt.len() < 0x400 {
         return false;
     }
@@ -171,7 +171,7 @@ pub fn validate_ivt(ivt: &[u8]) -> bool {
 
 /// Validate that Ultima V game data is present at the expected save-data offsets.
 /// `data` should start at the SAVE_BASE address; `game_data_offset` is typically 0.
-pub fn validate_game_data(data: &[u8], game_data_offset: usize) -> bool {
+pub(crate) fn validate_game_data(data: &[u8], game_data_offset: usize) -> bool {
     let valid_status = |b: u8| matches!(b, b'G' | b'P' | b'S' | b'D');
 
     // Check status bytes for first 4 character slots

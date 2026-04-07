@@ -32,8 +32,6 @@ pub const INV_GEMS: usize = 0x207;
 pub const INV_TORCHES: usize = 0x208;
 pub const INV_ARROWS: usize = 0x235;
 pub const INV_REAGENTS: usize = 0x2AA;
-#[allow(dead_code)]
-pub const INV_REAGENT_COUNT: usize = 8;
 pub const INV_PARTY_SIZE: usize = 0x2B5;
 pub const INV_KARMA: usize = 0x2E2;
 

@@ -73,8 +73,9 @@ impl UltimaCompanion {
 
                 if let Some(base) = dos_base {
                     self.status_msg = format!(
-                        "Attached to {} (PID {pid}), base={base:#x}{}",
+                        "Attached to {} (PID {}), base={base:#x}{}",
                         proc.name,
+                        proc.pid,
                         if game_confirmed {
                             ""
                         } else {
@@ -157,6 +158,7 @@ impl UltimaCompanion {
             Ok(inv) => self.inventory = inv,
             Err(e) => {
                 self.status_msg = format!("Read inventory failed: {e}");
+                return;
             }
         }
 

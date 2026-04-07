@@ -229,8 +229,8 @@ mod tests {
         let c0 = char_addr(0, 0, 0);
         mem.set_bytes(c0 + CHAR_NAME, b"Avatar\0\0\0");
         mem.set_bytes(c0 + CHAR_GENDER, &[0x0B]);
-        mem.set_bytes(c0 + CHAR_CLASS, &[b'A']);
-        mem.set_bytes(c0 + CHAR_STATUS, &[b'G']);
+        mem.set_bytes(c0 + CHAR_CLASS, b"A");
+        mem.set_bytes(c0 + CHAR_STATUS, b"G");
         mem.set_bytes(c0 + CHAR_STR, &[30]);
         mem.set_bytes(c0 + CHAR_DEX, &[25]);
         mem.set_bytes(c0 + CHAR_INT, &[28]);
@@ -245,8 +245,8 @@ mod tests {
         let c1 = char_addr(0, 1, 0);
         mem.set_bytes(c1 + CHAR_NAME, b"Shamino\0\0");
         mem.set_bytes(c1 + CHAR_GENDER, &[0x0B]);
-        mem.set_bytes(c1 + CHAR_CLASS, &[b'F']);
-        mem.set_bytes(c1 + CHAR_STATUS, &[b'P']);
+        mem.set_bytes(c1 + CHAR_CLASS, b"F");
+        mem.set_bytes(c1 + CHAR_STATUS, b"P");
         mem.set_bytes(c1 + CHAR_STR, &[25]);
         mem.set_bytes(c1 + CHAR_DEX, &[30]);
         mem.set_bytes(c1 + CHAR_INT, &[20]);
@@ -312,7 +312,7 @@ mod tests {
     #[test]
     fn invalid_status_returns_error() {
         let mem = setup_mock(1);
-        mem.set_bytes(char_addr(0, 0, CHAR_STATUS), &[b'X']);
+        mem.set_bytes(char_addr(0, 0, CHAR_STATUS), b"X");
         assert!(read_character(&mem, 0, 0).is_err());
     }
 

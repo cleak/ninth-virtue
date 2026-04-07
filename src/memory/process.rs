@@ -12,7 +12,6 @@ use super::access::Win32ProcessMemory;
 
 const STILL_ACTIVE: u32 = 259;
 
-#[allow(dead_code)]
 pub struct DosBoxProcess {
     pub pid: u32,
     pub name: String,
