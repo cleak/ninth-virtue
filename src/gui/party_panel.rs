@@ -129,7 +129,7 @@ pub fn show(ui: &mut egui::Ui, party: &mut [Character], mem: Option<(&dyn Memory
 
                 row.col(|ui| {
                     if ui
-                        .add(egui::DragValue::new(&mut ch.mp).range(0..=255))
+                        .add(egui::DragValue::new(&mut ch.mp).range(0..=99))
                         .changed()
                     {
                         changed = true;

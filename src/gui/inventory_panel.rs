@@ -44,7 +44,7 @@ pub fn show_resources(
 
             ui.label("🔑 Keys:");
             if ui
-                .add(egui::DragValue::new(&mut inventory.keys).range(0..=255))
+                .add(egui::DragValue::new(&mut inventory.keys).range(0..=99))
                 .changed()
             {
                 changed = true;
@@ -53,7 +53,7 @@ pub fn show_resources(
 
             ui.label("💎 Gems:");
             if ui
-                .add(egui::DragValue::new(&mut inventory.gems).range(0..=255))
+                .add(egui::DragValue::new(&mut inventory.gems).range(0..=99))
                 .changed()
             {
                 changed = true;
@@ -62,7 +62,7 @@ pub fn show_resources(
 
             ui.label("🔥 Torches:");
             if ui
-                .add(egui::DragValue::new(&mut inventory.torches).range(0..=255))
+                .add(egui::DragValue::new(&mut inventory.torches).range(0..=99))
                 .changed()
             {
                 changed = true;
@@ -71,7 +71,7 @@ pub fn show_resources(
 
             ui.label("🏹 Arrows:");
             if ui
-                .add(egui::DragValue::new(&mut inventory.arrows).range(0..=255))
+                .add(egui::DragValue::new(&mut inventory.arrows).range(0..=99))
                 .changed()
             {
                 changed = true;
@@ -80,7 +80,7 @@ pub fn show_resources(
 
             ui.label("☯ Karma:");
             if ui
-                .add(egui::DragValue::new(&mut inventory.karma).range(0..=255))
+                .add(egui::DragValue::new(&mut inventory.karma).range(0..=99))
                 .changed()
             {
                 changed = true;

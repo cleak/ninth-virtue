@@ -124,7 +124,7 @@ pub fn show(
         )
         .clicked()
     {
-        inventory.arrows = 255;
+        inventory.arrows = 99;
         if let Some((mem, base)) = mem {
             let _ = write_inventory(mem, base, inventory);
         }

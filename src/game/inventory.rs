@@ -105,9 +105,9 @@ mod tests {
             keys: 99,
             gems: 99,
             torches: 99,
-            arrows: 255,
+            arrows: 99,
             reagents: [99; 8],
-            karma: 100,
+            karma: 99,
         };
         write_inventory(&mem, 0, &inv).unwrap();
         let inv2 = read_inventory(&mem, 0).unwrap();
