@@ -1,8 +1,10 @@
 use std::time::{Duration, Instant};
 
 use crate::game::character::{Character, read_party};
+use crate::game::injection::{self, PatchState};
 use crate::game::inventory::{Inventory, read_inventory};
 use crate::gui;
+use crate::gui::memory_watch_panel::MemoryWatch;
 use crate::memory::access::MemoryAccess;
 use crate::memory::process::{self, DosBoxProcess};
 use crate::memory::scanner;
@@ -41,6 +43,12 @@ pub struct UltimaCompanion {
     refresh_interval_secs: f32,
     last_refresh: Instant,
     status_msg: String,
+
+    // Code injection for stats redraw
+    patch_state: Option<PatchState>,
+
+    // Debug: memory watch
+    memory_watch: MemoryWatch,
 }
 
 impl UltimaCompanion {
@@ -58,6 +66,8 @@ impl UltimaCompanion {
             refresh_interval_secs: 1.0,
             last_refresh: Instant::now(),
             status_msg: "Searching for DOSBox...".to_string(),
+            patch_state: None,
+            memory_watch: MemoryWatch::default(),
         };
         // Scan immediately on startup so we connect without delay.
         app.scan_processes();
@@ -119,6 +129,7 @@ impl UltimaCompanion {
 
                 if game_confirmed {
                     self.refresh_game_state();
+                    self.try_apply_patch();
                 }
             }
             Err(e) => {
@@ -128,11 +139,50 @@ impl UltimaCompanion {
     }
 
     fn detach(&mut self) {
+        // Remove the code patch before dropping the process handle.
+        if let (Some(attached), Some(state)) = (&self.attached, &self.patch_state) {
+            injection::remove_patch(&attached.process.memory, state);
+        }
+        self.patch_state = None;
         self.attached = None;
         self.party.clear();
         self.inventory = Inventory::default();
         self.suppress_auto_attach = true;
         self.status_msg = "Disconnected".to_string();
+    }
+
+    /// Try to apply the code-cave patch for stats redraw.  Non-fatal on
+    /// failure — the app continues to work, just without on-demand redraw.
+    fn try_apply_patch(&mut self) {
+        // Don't re-apply if already patched.
+        if self.patch_state.is_some() {
+            return;
+        }
+
+        let Some(ref attached) = self.attached else {
+            return;
+        };
+        let Some(dos_base) = attached.dos_base else {
+            return;
+        };
+
+        match injection::apply_patch(&attached.process.memory, dos_base) {
+            Ok(state) => {
+                self.patch_state = Some(state);
+                eprintln!("Redraw patch applied successfully");
+            }
+            Err(e) => {
+                eprintln!("Redraw patch failed (non-fatal): {e}");
+            }
+        }
+    }
+
+    fn handle_process_death(&mut self) {
+        self.patch_state = None; // Don't try to unpatch a dead process.
+        self.attached = None;
+        self.party.clear();
+        self.inventory = Inventory::default();
+        self.status_msg = "Process terminated".to_string();
     }
 
     fn rescan_memory(&mut self) {
@@ -142,12 +192,17 @@ impl UltimaCompanion {
         match scanner::find_dos_base(&attached.process.memory) {
             Ok(result) => {
                 attached.dos_base = Some(result.dos_base);
+                let was_confirmed = attached.game_confirmed;
                 attached.game_confirmed = result.game_confirmed;
                 if result.game_confirmed {
                     self.status_msg = format!(
                         "Connected to {} (PID {})",
                         attached.process.name, attached.process.pid,
                     );
+                    if !was_confirmed {
+                        // Game just became confirmed — apply patch.
+                        // (refresh_game_state is called by the caller)
+                    }
                 }
             }
             Err(e) => {
@@ -166,10 +221,7 @@ impl UltimaCompanion {
         };
 
         if !attached.process.is_alive() {
-            self.status_msg = "Process terminated".to_string();
-            self.attached = None;
-            self.party.clear();
-            self.inventory = Inventory::default();
+            self.handle_process_death();
             return;
         }
 
@@ -211,10 +263,7 @@ impl eframe::App for UltimaCompanion {
             ctx.request_repaint_after(PROCESS_SCAN_INTERVAL);
         } else if !self.attached.as_ref().unwrap().process.is_alive() {
             // Process died -- clean up.
-            self.attached = None;
-            self.party.clear();
-            self.inventory = Inventory::default();
-            self.status_msg = "Process terminated".to_string();
+            self.handle_process_death();
         } else {
             let game_confirmed = self.attached.as_ref().unwrap().game_confirmed;
 
@@ -224,6 +273,7 @@ impl eframe::App for UltimaCompanion {
                     self.rescan_memory();
                     if self.attached.as_ref().is_some_and(|a| a.game_confirmed) {
                         self.refresh_game_state();
+                        self.try_apply_patch();
                     }
                 }
                 ctx.request_repaint_after(RESCAN_INTERVAL);
@@ -252,6 +302,7 @@ impl eframe::App for UltimaCompanion {
                 dos_base,
                 &mut self.auto_refresh,
                 &mut self.refresh_interval_secs,
+                &mut self.memory_watch.visible,
                 &self.status_msg,
             );
         });
@@ -265,12 +316,25 @@ impl eframe::App for UltimaCompanion {
             gui::connection_bar::ConnectionAction::None => {}
         }
 
+        // --- Memory watch polling (every frame while recording) ---
+        if self.memory_watch.recording {
+            if let Some(ref attached) = self.attached
+                && let Some(dos_base) = attached.dos_base
+            {
+                self.memory_watch.poll(&attached.process.memory, dos_base);
+            }
+            // Keep repainting at max rate while recording.
+            ctx.request_repaint();
+        }
+
         // --- Main content ---
         // Destructure for disjoint borrow splitting
         let UltimaCompanion {
             attached,
             party,
             inventory,
+            patch_state,
+            memory_watch,
             ..
         } = self;
 
@@ -278,6 +342,9 @@ impl eframe::App for UltimaCompanion {
             a.dos_base
                 .map(|base| (&a.process.memory as &dyn MemoryAccess, base))
         });
+
+        // --- Memory watch window ---
+        gui::memory_watch_panel::show(ctx, memory_watch, mem);
 
         egui::CentralPanel::default().show(ctx, |ui| {
             gui::section_frame(ui).show(ui, |ui| {
@@ -298,7 +365,7 @@ impl eframe::App for UltimaCompanion {
                 });
                 gui::section_frame(&cols[2]).show(&mut cols[2], |ui| {
                     ui.set_min_size(ui.available_size());
-                    gui::actions_panel::show(ui, party, inventory, mem);
+                    gui::actions_panel::show(ui, party, inventory, mem, patch_state.as_ref());
                 });
             });
         });

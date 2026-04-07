@@ -1,5 +1,7 @@
 use crate::game::character::{Character, Status, write_character};
+use crate::game::injection::PatchState;
 use crate::game::inventory::{Inventory, write_inventory};
+use crate::game::redraw::nudge_redraw;
 use crate::memory::access::MemoryAccess;
 
 const HEADING_COLOR: egui::Color32 = egui::Color32::from_rgb(100, 220, 180);
@@ -12,6 +14,7 @@ pub fn show(
     party: &mut [Character],
     inventory: &mut Inventory,
     mem: Option<(&dyn MemoryAccess, usize)>,
+    patch: Option<&PatchState>,
 ) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
@@ -42,6 +45,9 @@ pub fn show(
                 let _ = write_character(mem, base, ch);
             }
         }
+        if let Some((mem, base)) = mem {
+            let _ = nudge_redraw(mem, base, patch);
+        }
     }
 
     if ui
@@ -60,6 +66,9 @@ pub fn show(
                     let _ = write_character(mem, base, ch);
                 }
             }
+        }
+        if let Some((mem, base)) = mem {
+            let _ = nudge_redraw(mem, base, patch);
         }
     }
 
@@ -81,6 +90,9 @@ pub fn show(
                 }
             }
         }
+        if let Some((mem, base)) = mem {
+            let _ = nudge_redraw(mem, base, patch);
+        }
     }
 
     ui.add_space(4.0);
@@ -97,6 +109,7 @@ pub fn show(
         inventory.gold = 9999;
         if let Some((mem, base)) = mem {
             let _ = write_inventory(mem, base, inventory);
+            let _ = nudge_redraw(mem, base, patch);
         }
     }
 
@@ -112,6 +125,7 @@ pub fn show(
         inventory.food = 9999;
         if let Some((mem, base)) = mem {
             let _ = write_inventory(mem, base, inventory);
+            let _ = nudge_redraw(mem, base, patch);
         }
     }
 
@@ -127,6 +141,7 @@ pub fn show(
         inventory.arrows = 99;
         if let Some((mem, base)) = mem {
             let _ = write_inventory(mem, base, inventory);
+            let _ = nudge_redraw(mem, base, patch);
         }
     }
 
@@ -142,6 +157,7 @@ pub fn show(
         inventory.reagents = [99; 8];
         if let Some((mem, base)) = mem {
             let _ = write_inventory(mem, base, inventory);
+            let _ = nudge_redraw(mem, base, patch);
         }
     }
 }
