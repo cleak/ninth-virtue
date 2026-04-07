@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-u5-companion is a companion app for Ultima V (classic DOS RPG). It attaches to a running DOSBox/DOSBox Staging process, locates the game's virtual memory base address, and provides quality-of-life features: curing poison, adding arrows, restoring health, and eventually a mini-map overlay. The core challenge is automating the discovery of the memory base pointer within the emulator's address space — once found, all game data offsets are known.
+ninth-virtue ("The Ninth Virtue: Convenience") is a companion app for Ultima V (classic DOS RPG). It attaches to a running DOSBox/DOSBox Staging process, locates the game's virtual memory base address, and provides quality-of-life features: curing poison, adding arrows, restoring health, and eventually a mini-map overlay. The core challenge is automating the discovery of the memory base pointer within the emulator's address space — once found, all game data offsets are known.
 
 ## Build Commands
 

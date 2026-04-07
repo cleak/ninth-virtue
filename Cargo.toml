@@ -1,8 +1,8 @@
 [package]
-name = "u5-companion"
+name = "ninth-virtue"
 version = "0.1.0"
 edition = "2024"
-default-run = "u5-companion"
+default-run = "ninth-virtue"
 
 [dependencies]
 eframe = "0.31"

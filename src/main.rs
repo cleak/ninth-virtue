@@ -7,11 +7,11 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([800.0, 600.0])
-            .with_title("Ultima V Companion"),
+            .with_title("The Ninth Virtue"),
         ..Default::default()
     };
     eframe::run_native(
-        "u5-companion",
+        "ninth-virtue",
         options,
         Box::new(|cc| {
             // Add Segoe UI Emoji as a fallback font for emoji support.

@@ -4,10 +4,10 @@ use std::thread;
 use std::time::Duration;
 
 fn main() {
-    use u5_companion::game::character::read_party;
-    use u5_companion::game::inventory::read_inventory;
-    use u5_companion::memory::process;
-    use u5_companion::memory::scanner;
+    use ninth_virtue::game::character::read_party;
+    use ninth_virtue::game::inventory::read_inventory;
+    use ninth_virtue::memory::process;
+    use ninth_virtue::memory::scanner;
 
     println!("=== Scanner Stability Loop ===\n");
 
