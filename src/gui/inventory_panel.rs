@@ -1,7 +1,11 @@
-use crate::game::inventory::{Inventory, REAGENT_NAMES};
+use crate::game::inventory::{Inventory, REAGENT_NAMES, write_inventory};
 use crate::memory::access::MemoryAccess;
 
-pub fn show(ui: &mut egui::Ui, inventory: &mut Inventory, mem: Option<(&dyn MemoryAccess, usize)>) {
+pub fn show_resources(
+    ui: &mut egui::Ui,
+    inventory: &mut Inventory,
+    mem: Option<(&dyn MemoryAccess, usize)>,
+) {
     let mut changed = false;
 
     ui.heading("Resources");
@@ -62,9 +66,29 @@ pub fn show(ui: &mut egui::Ui, inventory: &mut Inventory, mem: Option<(&dyn Memo
                 changed = true;
             }
             ui.end_row();
+
+            ui.label("Karma:");
+            if ui
+                .add(egui::DragValue::new(&mut inventory.karma).range(0..=255))
+                .changed()
+            {
+                changed = true;
+            }
+            ui.end_row();
         });
 
-    ui.add_space(8.0);
+    if changed && let Some((mem, dos_base)) = mem {
+        let _ = write_inventory(mem, dos_base, inventory);
+    }
+}
+
+pub fn show_reagents(
+    ui: &mut egui::Ui,
+    inventory: &mut Inventory,
+    mem: Option<(&dyn MemoryAccess, usize)>,
+) {
+    let mut changed = false;
+
     ui.heading("Reagents");
     egui::Grid::new("inv_reagents")
         .num_columns(2)
@@ -82,22 +106,7 @@ pub fn show(ui: &mut egui::Ui, inventory: &mut Inventory, mem: Option<(&dyn Memo
             }
         });
 
-    ui.add_space(8.0);
-    egui::Grid::new("inv_other")
-        .num_columns(2)
-        .spacing([8.0, 4.0])
-        .show(ui, |ui| {
-            ui.label("Karma:");
-            if ui
-                .add(egui::DragValue::new(&mut inventory.karma).range(0..=255))
-                .changed()
-            {
-                changed = true;
-            }
-            ui.end_row();
-        });
-
     if changed && let Some((mem, dos_base)) = mem {
-        let _ = crate::game::inventory::write_inventory(mem, dos_base, inventory);
+        let _ = write_inventory(mem, dos_base, inventory);
     }
 }

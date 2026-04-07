@@ -103,8 +103,7 @@ impl UltimaCompanion {
 
                 if dos_base.is_some() {
                     if game_confirmed {
-                        self.status_msg =
-                            format!("Connected to {} (PID {})", proc.name, proc.pid,);
+                        self.status_msg = format!("Connected to {} (PID {})", proc.name, proc.pid,);
                     } else {
                         self.status_msg = "Waiting for game to load...".to_string();
                     }
@@ -281,11 +280,22 @@ impl eframe::App for UltimaCompanion {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            gui::party_panel::show(ui, party, mem);
-            ui.separator();
-            ui.columns(2, |cols| {
-                gui::inventory_panel::show(&mut cols[0], inventory, mem);
-                gui::actions_panel::show(&mut cols[1], party, inventory, mem);
+            gui::section_frame(ui).show(ui, |ui| {
+                gui::party_panel::show(ui, party, mem);
+            });
+
+            ui.add_space(4.0);
+
+            ui.columns(3, |cols| {
+                gui::section_frame(&cols[0]).show(&mut cols[0], |ui| {
+                    gui::inventory_panel::show_resources(ui, inventory, mem);
+                });
+                gui::section_frame(&cols[1]).show(&mut cols[1], |ui| {
+                    gui::inventory_panel::show_reagents(ui, inventory, mem);
+                });
+                gui::section_frame(&cols[2]).show(&mut cols[2], |ui| {
+                    gui::actions_panel::show(ui, party, inventory, mem);
+                });
             });
         });
     }

@@ -12,17 +12,17 @@ pub fn show(ui: &mut egui::Ui, party: &mut [Character], mem: Option<(&dyn Memory
     ui.heading("Party");
 
     TableBuilder::new(ui)
-        .column(Column::auto().at_least(80.0)) // Name
-        .column(Column::auto()) // Class
-        .column(Column::auto().at_least(80.0)) // Status
-        .column(Column::auto()) // STR
-        .column(Column::auto()) // DEX
-        .column(Column::auto()) // INT
-        .column(Column::auto()) // MP
-        .column(Column::auto()) // HP
-        .column(Column::auto()) // MaxHP
-        .column(Column::auto()) // XP
-        .column(Column::auto()) // Lvl
+        .column(Column::auto().at_least(70.0)) // Name
+        .column(Column::exact(55.0)) // Class
+        .column(Column::auto().at_least(85.0)) // Status
+        .column(Column::exact(40.0)) // STR
+        .column(Column::exact(40.0)) // DEX
+        .column(Column::exact(40.0)) // INT
+        .column(Column::exact(40.0)) // MP
+        .column(Column::exact(45.0)) // HP
+        .column(Column::exact(50.0)) // MaxHP
+        .column(Column::exact(50.0)) // XP
+        .column(Column::exact(35.0)) // Lvl
         .striped(true)
         .header(20.0, |mut header| {
             header.col(|ui| {

@@ -11,95 +11,101 @@ pub fn show(
     ui.heading("Quick Actions");
 
     let enabled = mem.is_some();
+    let button_size = egui::vec2(ui.available_width(), 24.0);
 
-    egui::Grid::new("actions")
-        .num_columns(3)
-        .spacing([8.0, 8.0])
-        .show(ui, |ui| {
-            if ui
-                .add_enabled(enabled, egui::Button::new("Heal All"))
-                .clicked()
-            {
-                for ch in party.iter_mut() {
-                    ch.hp = ch.max_hp;
-                    ch.status = Status::Good;
-                    if let Some((mem, base)) = mem {
-                        let _ = write_character(mem, base, ch);
-                    }
-                }
+    if ui
+        .add_enabled(enabled, egui::Button::new("Heal All").min_size(button_size))
+        .clicked()
+    {
+        for ch in party.iter_mut() {
+            ch.hp = ch.max_hp;
+            ch.status = Status::Good;
+            if let Some((mem, base)) = mem {
+                let _ = write_character(mem, base, ch);
             }
+        }
+    }
 
-            if ui
-                .add_enabled(enabled, egui::Button::new("Cure Poison"))
-                .clicked()
-            {
-                for ch in party.iter_mut() {
-                    if ch.status == Status::Poisoned {
-                        ch.status = Status::Good;
-                        if let Some((mem, base)) = mem {
-                            let _ = write_character(mem, base, ch);
-                        }
-                    }
-                }
-            }
-
-            if ui
-                .add_enabled(enabled, egui::Button::new("Resurrect All"))
-                .clicked()
-            {
-                for ch in party.iter_mut() {
-                    if ch.status == Status::Dead {
-                        ch.status = Status::Good;
-                        ch.hp = ch.max_hp;
-                        if let Some((mem, base)) = mem {
-                            let _ = write_character(mem, base, ch);
-                        }
-                    }
-                }
-            }
-
-            ui.end_row();
-
-            if ui
-                .add_enabled(enabled, egui::Button::new("Max Gold"))
-                .clicked()
-            {
-                inventory.gold = 9999;
+    if ui
+        .add_enabled(
+            enabled,
+            egui::Button::new("Cure Poison").min_size(button_size),
+        )
+        .clicked()
+    {
+        for ch in party.iter_mut() {
+            if ch.status == Status::Poisoned {
+                ch.status = Status::Good;
                 if let Some((mem, base)) = mem {
-                    let _ = write_inventory(mem, base, inventory);
+                    let _ = write_character(mem, base, ch);
                 }
             }
+        }
+    }
 
-            if ui
-                .add_enabled(enabled, egui::Button::new("Max Food"))
-                .clicked()
-            {
-                inventory.food = 9999;
+    if ui
+        .add_enabled(
+            enabled,
+            egui::Button::new("Resurrect All").min_size(button_size),
+        )
+        .clicked()
+    {
+        for ch in party.iter_mut() {
+            if ch.status == Status::Dead {
+                ch.status = Status::Good;
+                ch.hp = ch.max_hp;
                 if let Some((mem, base)) = mem {
-                    let _ = write_inventory(mem, base, inventory);
+                    let _ = write_character(mem, base, ch);
                 }
             }
+        }
+    }
 
-            if ui
-                .add_enabled(enabled, egui::Button::new("Refill Arrows"))
-                .clicked()
-            {
-                inventory.arrows = 255;
-                if let Some((mem, base)) = mem {
-                    let _ = write_inventory(mem, base, inventory);
-                }
-            }
+    ui.add_space(4.0);
 
-            ui.end_row();
+    if ui
+        .add_enabled(enabled, egui::Button::new("Max Gold").min_size(button_size))
+        .clicked()
+    {
+        inventory.gold = 9999;
+        if let Some((mem, base)) = mem {
+            let _ = write_inventory(mem, base, inventory);
+        }
+    }
 
-            if ui
-                .add_enabled(enabled, egui::Button::new("Max Reagents"))
-                .clicked()
-            {
-                inventory.reagents = [99; 8];
-                if let Some((mem, base)) = mem {
-                    let _ = write_inventory(mem, base, inventory);
-                }
-            }
-        });
+    if ui
+        .add_enabled(enabled, egui::Button::new("Max Food").min_size(button_size))
+        .clicked()
+    {
+        inventory.food = 9999;
+        if let Some((mem, base)) = mem {
+            let _ = write_inventory(mem, base, inventory);
+        }
+    }
+
+    if ui
+        .add_enabled(
+            enabled,
+            egui::Button::new("Refill Arrows").min_size(button_size),
+        )
+        .clicked()
+    {
+        inventory.arrows = 255;
+        if let Some((mem, base)) = mem {
+            let _ = write_inventory(mem, base, inventory);
+        }
+    }
+
+    if ui
+        .add_enabled(
+            enabled,
+            egui::Button::new("Max Reagents").min_size(button_size),
+        )
+        .clicked()
+    {
+        inventory.reagents = [99; 8];
+        if let Some((mem, base)) = mem {
+            let _ = write_inventory(mem, base, inventory);
+        }
+    }
 }
