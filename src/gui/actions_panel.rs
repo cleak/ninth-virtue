@@ -47,7 +47,7 @@ pub fn show(
     if ui
         .add_enabled(
             enabled,
-            egui::Button::new(egui::RichText::new("✚ Cure Poison").color(BTN_TEXT))
+            egui::Button::new(egui::RichText::new("🩹 Cure Poison").color(BTN_TEXT))
                 .fill(HEAL_FILL)
                 .min_size(button_size),
         )
@@ -118,7 +118,7 @@ pub fn show(
     if ui
         .add_enabled(
             enabled,
-            egui::Button::new(egui::RichText::new("Refill Arrows").color(BTN_TEXT))
+            egui::Button::new(egui::RichText::new("🏹 Refill Arrows").color(BTN_TEXT))
                 .fill(INV_FILL)
                 .min_size(button_size),
         )
@@ -133,7 +133,7 @@ pub fn show(
     if ui
         .add_enabled(
             enabled,
-            egui::Button::new(egui::RichText::new("⚗ Max Reagents").color(BTN_TEXT))
+            egui::Button::new(egui::RichText::new("🧪 Max Reagents").color(BTN_TEXT))
                 .fill(INV_FILL)
                 .min_size(button_size),
         )

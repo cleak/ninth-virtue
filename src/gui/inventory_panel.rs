@@ -69,7 +69,7 @@ pub fn show_resources(
             }
             ui.end_row();
 
-            ui.label("Arrows:");
+            ui.label("🏹 Arrows:");
             if ui
                 .add(egui::DragValue::new(&mut inventory.arrows).range(0..=255))
                 .changed()
@@ -100,7 +100,7 @@ pub fn show_reagents(
 ) {
     let mut changed = false;
 
-    colored_heading(ui, "⚗", "Reagents", REAGENT_HEADING);
+    colored_heading(ui, "🧪", "Reagents", REAGENT_HEADING);
     egui::Grid::new("inv_reagents")
         .num_columns(2)
         .spacing([8.0, 4.0])

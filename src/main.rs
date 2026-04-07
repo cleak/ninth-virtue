@@ -14,6 +14,21 @@ fn main() -> eframe::Result {
         "u5-companion",
         options,
         Box::new(|cc| {
+            // Add Segoe UI Emoji as a fallback font for emoji support.
+            if let Ok(emoji_data) = std::fs::read("C:/Windows/Fonts/seguiemj.ttf") {
+                let mut fonts = egui::FontDefinitions::default();
+                fonts.font_data.insert(
+                    "emoji".to_owned(),
+                    egui::FontData::from_owned(emoji_data).into(),
+                );
+                fonts
+                    .families
+                    .entry(egui::FontFamily::Proportional)
+                    .or_default()
+                    .push("emoji".to_owned());
+                cc.egui_ctx.set_fonts(fonts);
+            }
+
             let mut style = (*cc.egui_ctx.style()).clone();
             style.spacing.item_spacing = egui::vec2(8.0, 4.0);
             for ws in [
