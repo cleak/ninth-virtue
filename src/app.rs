@@ -449,9 +449,7 @@ impl eframe::App for UltimaCompanion {
 
         // After all panels have run, trigger a single redraw if any
         // panel wrote to game memory.
-        if game_written
-            && let (Some((mem, _)), Some(patch)) = (mem, patch_state.as_ref())
-        {
+        if game_written && let (Some((mem, _)), Some(patch)) = (mem, patch_state.as_ref()) {
             let _ = injection::trigger_redraw(mem, patch);
         }
     }

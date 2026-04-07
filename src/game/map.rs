@@ -30,11 +30,6 @@ impl LocationType {
         }
     }
 
-    #[allow(dead_code)] // Phase 5: dungeon support
-    pub fn is_dungeon(&self) -> bool {
-        matches!(self, Self::Dungeon(_))
-    }
-
     /// Human-readable name for the location.
     pub fn name(&self) -> &'static str {
         match self {
@@ -161,13 +156,6 @@ mod tests {
         assert_eq!(LocationType::Town(2).name(), "Britain");
         assert_eq!(LocationType::Dungeon(33).name(), "Deceit");
         assert_eq!(LocationType::Overworld.name(), "Overworld");
-    }
-
-    #[test]
-    fn is_dungeon() {
-        assert!(LocationType::Dungeon(33).is_dungeon());
-        assert!(!LocationType::Town(2).is_dungeon());
-        assert!(!LocationType::Overworld.is_dungeon());
     }
 
     #[test]

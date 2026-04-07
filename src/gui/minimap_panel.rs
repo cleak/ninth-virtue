@@ -149,7 +149,7 @@ pub fn show_no_atlas(ui: &mut egui::Ui, status: &str) {
     });
 }
 
-/// Detailed rendering: each tile is 16x16 pixels. Used for zoom <= 64.
+/// Render the overworld from the WorldMap: each tile is 16x16 pixels.
 fn build_detail_image(
     world: &WorldMap,
     atlas: &TileAtlas,
@@ -206,41 +206,31 @@ fn build_memory_image(
     let img_side = grid_side * TILE_SIZE;
     let mut pixels = vec![Color32::BLACK; img_side * img_side];
 
-    let pbx = player_x.wrapping_sub(scroll_x) as i32;
-    let pby = player_y.wrapping_sub(scroll_y) as i32;
-    let half = grid_side as i32 / 2;
-    let origin_x = (pbx - half).clamp(0, 0);
-    let origin_y = (pby - half).clamp(0, 0);
-
-    for vy in 0..grid_side {
-        for vx in 0..grid_side {
-            let gx = origin_x + vx as i32;
-            let gy = origin_y + vy as i32;
-            if gx < 0 || gy < 0 || gx >= grid_side as i32 || gy >= grid_side as i32 {
-                continue;
-            }
-
-            let gxu = gx as usize;
-            let gyu = gy as usize;
-            let cx = gxu / 16;
-            let cy = gyu / 16;
-            let lx = gxu % 16;
-            let ly = gyu % 16;
+    // Render all 32x32 tiles from the chunked memory grid
+    for gy in 0..grid_side {
+        for gx in 0..grid_side {
+            let cx = gx / 16;
+            let cy = gy / 16;
+            let lx = gx % 16;
+            let ly = gy % 16;
             let tile_id = tiles[(cy * 2 + cx) * 256 + ly * 16 + lx] as u16;
             let rgba = atlas.tile_rgba(tile_id);
 
             for py in 0..TILE_SIZE {
                 for px in 0..TILE_SIZE {
                     let src = (py * TILE_SIZE + px) * 4;
-                    let dst = (vy * TILE_SIZE + py) * img_side + (vx * TILE_SIZE + px);
+                    let dst = (gy * TILE_SIZE + py) * img_side + (gx * TILE_SIZE + px);
                     pixels[dst] = Color32::from_rgb(rgba[src], rgba[src + 1], rgba[src + 2]);
                 }
             }
         }
     }
 
-    let marker_vx = pbx.clamp(0, grid_side as i32 - 1) as usize;
-    let marker_vy = pby.clamp(0, grid_side as i32 - 1) as usize;
+    // Player marker at their position within the buffer
+    let pbx = player_x.wrapping_sub(scroll_x) as usize;
+    let pby = player_y.wrapping_sub(scroll_y) as usize;
+    let marker_vx = pbx.min(grid_side - 1);
+    let marker_vy = pby.min(grid_side - 1);
     draw_marker(&mut pixels, img_side, marker_vx, marker_vy, TILE_SIZE);
 
     ColorImage {

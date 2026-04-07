@@ -34,10 +34,6 @@ pub const MAP_SCROLL_X: usize = 0x2F5;
 pub const MAP_SCROLL_Y: usize = 0x2F6;
 pub const MAP_TILES: usize = 0x1062;
 pub const MAP_TILES_LEN: usize = 1024;
-#[allow(dead_code)] // Phase 5: dungeon support
-pub const DUNGEON_MAP: usize = 0x3B4;
-#[allow(dead_code)] // Phase 5: dungeon support
-pub const DUNGEON_MAP_LEN: usize = 512;
 
 // Inventory save offsets (add SAVE_BASE for DOS address)
 pub const INV_FOOD: usize = 0x202;

@@ -150,25 +150,11 @@ mod tests {
 
     #[test]
     fn decompress_trivial_end_code() {
-        // Header: uncompressed length = 0
-        // Then END_CODE (0x101) encoded as 9-bit LSB-first
-        // 0x101 = 0b100000001, in 9 bits LSB-first:
-        // byte 0: low 8 bits = 0x01
-        // byte 1: bit 8 = 1, so 0x01
-        let mut data = vec![0u8, 0, 0, 0]; // length = 0
-        data.push(0x02); // END_CODE (0x101) LSB-first: bits = 1,0,0,0,0,0,0,0,1
-        data.push(0x02); // remaining bit
-
-        // Actually let's just test with the proper encoding.
-        // END_CODE = 257 = 0x101
-        // 9-bit code, LSB first packed into bytes:
-        // bits: 1 0 0 0 0 0 0 0 1 (bit0..bit8)
-        // byte0 = bits 0-7 = 0b00000001 = 0x01
-        // byte1 = bit 8    = 0b00000001 = 0x01
+        // Header: uncompressed length = 0, then END_CODE (0x101) as 9-bit LSB-first.
+        // 0x101 in binary = 100000001. LSB-first into bytes:
+        //   byte[0] = bits 0-7 = 0b00000001 = 0x01
+        //   byte[1] = bit 8    = 0b00000001 = 0x01
         let data = vec![0, 0, 0, 0, 0x01, 0x01];
-        // This won't work perfectly because 257 in 9 bits LSB first is actually:
-        // bit0=1, bit1=0, ..., bit7=0, bit8=1
-        // packed: byte[0] = 0b00000001 = 1, byte[1] = 0b00000001 (bit8 in position 0)
         let result = decompress(&data).unwrap();
         assert_eq!(result.len(), 0);
     }

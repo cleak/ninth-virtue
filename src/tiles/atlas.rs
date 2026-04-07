@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -113,8 +113,6 @@ fn find_tiles_file(game_dir: &Path) -> Result<PathBuf> {
 
     anyhow::bail!("tiles.16 not found in {}", game_dir.display())
 }
-
-use std::path::PathBuf;
 
 #[cfg(test)]
 mod tests {
