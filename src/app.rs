@@ -137,17 +137,22 @@ impl UltimaCompanion {
                 match config::find_game_directory(proc.memory.handle()) {
                     Ok(dir) => {
                         match TileAtlas::load(&dir) {
-                            Ok(atlas) => self.tile_atlas = Some(atlas),
+                            Ok(atlas) => {
+                                self.tile_atlas = Some(atlas);
+                                // Only load the world map if the atlas succeeded
+                                match WorldMap::load(&dir) {
+                                    Ok(wm) => self.world_map = Some(wm),
+                                    Err(e) => {
+                                        self.status_msg = format!(
+                                            "World map failed: {e} (dir: {})",
+                                            dir.display()
+                                        );
+                                    }
+                                }
+                            }
                             Err(e) => {
                                 self.status_msg =
                                     format!("Tiles failed: {e} (dir: {})", dir.display());
-                            }
-                        }
-                        match WorldMap::load(&dir) {
-                            Ok(wm) => self.world_map = Some(wm),
-                            Err(e) => {
-                                self.status_msg =
-                                    format!("World map failed: {e} (dir: {})", dir.display());
                             }
                         }
                         self.game_dir = Some(dir);

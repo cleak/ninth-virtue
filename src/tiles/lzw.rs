@@ -70,7 +70,9 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
             code
         } else {
             // KwKwK case: code == next_free, decode prev_code and append its first byte
-            prev_code.unwrap_or(0)
+            prev_code.ok_or_else(|| {
+                anyhow::anyhow!("invalid LZW stream: unknown code {code} with no previous code")
+            })?
         };
 
         // Decode the string for decode_code by walking the prefix chain

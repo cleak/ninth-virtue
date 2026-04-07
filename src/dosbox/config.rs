@@ -195,7 +195,7 @@ pub fn validate_game_dir(path: &Path) -> bool {
         return false;
     }
 
-    let required = ["BRIT.DAT", "TOWNE.DAT"];
+    let required = ["BRIT.DAT", "TOWNE.DAT", "DATA.OVL", "TILES.16"];
     let Ok(entries) = std::fs::read_dir(path) else {
         return false;
     };

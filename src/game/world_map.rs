@@ -25,12 +25,23 @@ impl WorldMap {
             "DATA.OVL too small ({} bytes)",
             ovl.len()
         );
-        let chunk_flags = &ovl[DATA_OVL_CHUNK_FLAGS..DATA_OVL_CHUNK_FLAGS + 256];
+        let chunk_flags: &[u8; 256] = ovl[DATA_OVL_CHUNK_FLAGS..DATA_OVL_CHUNK_FLAGS + 256]
+            .try_into()
+            .unwrap();
 
         let brit_path = find_file(game_dir, "brit.dat")?;
         let brit = std::fs::read(&brit_path)
             .with_context(|| format!("failed to read {}", brit_path.display()))?;
 
+        Self::from_raw(chunk_flags, &brit)
+    }
+
+    /// Build a WorldMap from raw chunk flags and BRIT.DAT data.
+    ///
+    /// Each of the 256 chunk flag bytes is either 0xFF (water-only chunk,
+    /// filled with tile 0x01) or the chunk's sequential index into `brit_data`.
+    /// Each chunk is 256 bytes (16x16 tiles, row-major).
+    fn from_raw(chunk_flags: &[u8; 256], brit_data: &[u8]) -> Result<Self> {
         let mut tiles = Box::new([0u8; 256 * 256]);
 
         for (chunk_idx, &flag) in chunk_flags.iter().enumerate() {
@@ -38,30 +49,25 @@ impl WorldMap {
             let chunk_y = chunk_idx / 16;
 
             if flag == 0xFF {
-                // Water-only chunk
                 for ly in 0..16 {
                     for lx in 0..16 {
-                        let wx = chunk_x * 16 + lx;
-                        let wy = chunk_y * 16 + ly;
-                        tiles[wy * 256 + wx] = WATER_TILE;
+                        tiles[(chunk_y * 16 + ly) * 256 + chunk_x * 16 + lx] = WATER_TILE;
                     }
                 }
             } else {
-                // Read chunk from BRIT.DAT at the index given by the flag byte
                 let file_offset = flag as usize * 256;
                 anyhow::ensure!(
-                    file_offset + 256 <= brit.len(),
+                    file_offset + 256 <= brit_data.len(),
                     "BRIT.DAT too small: chunk {} wants offset {}, file is {} bytes",
                     chunk_idx,
                     file_offset + 256,
-                    brit.len()
+                    brit_data.len()
                 );
-                let chunk_data = &brit[file_offset..file_offset + 256];
+                let chunk_data = &brit_data[file_offset..file_offset + 256];
                 for ly in 0..16 {
                     for lx in 0..16 {
-                        let wx = chunk_x * 16 + lx;
-                        let wy = chunk_y * 16 + ly;
-                        tiles[wy * 256 + wx] = chunk_data[ly * 16 + lx];
+                        tiles[(chunk_y * 16 + ly) * 256 + chunk_x * 16 + lx] =
+                            chunk_data[ly * 16 + lx];
                     }
                 }
             }
@@ -98,12 +104,8 @@ mod tests {
 
     #[test]
     fn all_water_chunks() {
-        // Simulate: all 256 chunks are water (flag = 0xFF)
         let chunk_flags = [0xFFu8; 256];
-        let brit_data = Vec::new(); // empty, no chunks to read
-
-        let map = load_from_data(&chunk_flags, &brit_data).unwrap();
-        // Every tile should be water
+        let map = WorldMap::from_raw(&chunk_flags, &[]).unwrap();
         for y in 0..=255u8 {
             for x in 0..=255u8 {
                 assert_eq!(map.get_tile(x, y), 0x01);
@@ -113,70 +115,28 @@ mod tests {
 
     #[test]
     fn single_non_water_chunk() {
-        // Chunk 0 is non-water (flag=0, first in file), rest are water
         let mut chunk_flags = [0xFFu8; 256];
-        chunk_flags[0] = 0x00; // chunk 0 → BRIT.DAT index 0
+        chunk_flags[0] = 0x00;
+        let brit_data = vec![0x05u8; 256]; // grass
 
-        // 256 bytes of tile data for chunk 0: all tile 0x05 (grass)
-        let brit_data = vec![0x05u8; 256];
-
-        let map = load_from_data(&chunk_flags, &brit_data).unwrap();
-
-        // Chunk 0 is at world (0..16, 0..16) — should be grass
+        let map = WorldMap::from_raw(&chunk_flags, &brit_data).unwrap();
         assert_eq!(map.get_tile(0, 0), 0x05);
         assert_eq!(map.get_tile(15, 15), 0x05);
-
-        // Chunk 1 (world x=16..32, y=0..16) — should be water
-        assert_eq!(map.get_tile(16, 0), 0x01);
+        assert_eq!(map.get_tile(16, 0), 0x01); // adjacent chunk is water
     }
 
     #[test]
     fn chunk_ordering() {
-        // Two non-water chunks with different tiles to verify ordering
         let mut chunk_flags = [0xFFu8; 256];
-        chunk_flags[0] = 0x00; // chunk 0 → BRIT.DAT[0]
-        chunk_flags[1] = 0x01; // chunk 1 → BRIT.DAT[256]
+        chunk_flags[0] = 0x00;
+        chunk_flags[1] = 0x01;
 
         let mut brit_data = vec![0x05u8; 256]; // chunk 0: grass
         brit_data.extend(vec![0x07u8; 256]); // chunk 1: desert
 
-        let map = load_from_data(&chunk_flags, &brit_data).unwrap();
-
-        // Chunk 0 at (0,0): grass
-        assert_eq!(map.get_tile(0, 0), 0x05);
-        // Chunk 1 at (16,0): desert
-        assert_eq!(map.get_tile(16, 0), 0x07);
-        // Chunk 16 at (0,16): water (still 0xFF)
-        assert_eq!(map.get_tile(0, 16), 0x01);
-    }
-
-    /// Helper to construct WorldMap from raw data (bypasses file I/O)
-    fn load_from_data(chunk_flags: &[u8; 256], brit_data: &[u8]) -> Result<WorldMap> {
-        let mut tiles = Box::new([0u8; 256 * 256]);
-
-        for chunk_idx in 0..256usize {
-            let chunk_x = chunk_idx % 16;
-            let chunk_y = chunk_idx / 16;
-            let flag = chunk_flags[chunk_idx];
-
-            if flag == 0xFF {
-                for ly in 0..16 {
-                    for lx in 0..16 {
-                        tiles[(chunk_y * 16 + ly) * 256 + chunk_x * 16 + lx] = 0x01;
-                    }
-                }
-            } else {
-                let offset = flag as usize * 256;
-                anyhow::ensure!(offset + 256 <= brit_data.len());
-                let chunk = &brit_data[offset..offset + 256];
-                for ly in 0..16 {
-                    for lx in 0..16 {
-                        tiles[(chunk_y * 16 + ly) * 256 + chunk_x * 16 + lx] = chunk[ly * 16 + lx];
-                    }
-                }
-            }
-        }
-
-        Ok(WorldMap { tiles })
+        let map = WorldMap::from_raw(&chunk_flags, &brit_data).unwrap();
+        assert_eq!(map.get_tile(0, 0), 0x05); // chunk 0
+        assert_eq!(map.get_tile(16, 0), 0x07); // chunk 1
+        assert_eq!(map.get_tile(0, 16), 0x01); // chunk 16: water
     }
 }

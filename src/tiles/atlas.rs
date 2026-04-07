@@ -58,7 +58,7 @@ impl TileAtlas {
     /// Get the RGBA pixel data for a tile by ID (0-511).
     /// Returns a 16x16x4 = 1024 byte slice.
     pub fn tile_rgba(&self, tile_id: u16) -> &[u8] {
-        let idx = tile_id as usize;
+        let idx = (tile_id as usize) % TILE_COUNT;
         let start = idx * RGBA_PER_TILE;
         &self.data[start..start + RGBA_PER_TILE]
     }
