@@ -8,13 +8,16 @@ pub fn show(
     inventory: &mut Inventory,
     mem: Option<(&dyn MemoryAccess, usize)>,
 ) {
-    ui.heading("Quick Actions");
+    ui.heading("⚡ Quick Actions");
 
     let enabled = mem.is_some();
     let button_size = egui::vec2(ui.available_width(), 24.0);
 
     if ui
-        .add_enabled(enabled, egui::Button::new("Heal All").min_size(button_size))
+        .add_enabled(
+            enabled,
+            egui::Button::new("💚 Heal All").min_size(button_size),
+        )
         .clicked()
     {
         for ch in party.iter_mut() {
@@ -29,7 +32,7 @@ pub fn show(
     if ui
         .add_enabled(
             enabled,
-            egui::Button::new("Cure Poison").min_size(button_size),
+            egui::Button::new("🩹 Cure Poison").min_size(button_size),
         )
         .clicked()
     {
@@ -46,7 +49,7 @@ pub fn show(
     if ui
         .add_enabled(
             enabled,
-            egui::Button::new("Resurrect All").min_size(button_size),
+            egui::Button::new("✨ Resurrect All").min_size(button_size),
         )
         .clicked()
     {
@@ -64,7 +67,10 @@ pub fn show(
     ui.add_space(4.0);
 
     if ui
-        .add_enabled(enabled, egui::Button::new("Max Gold").min_size(button_size))
+        .add_enabled(
+            enabled,
+            egui::Button::new("💰 Max Gold").min_size(button_size),
+        )
         .clicked()
     {
         inventory.gold = 9999;
@@ -74,7 +80,10 @@ pub fn show(
     }
 
     if ui
-        .add_enabled(enabled, egui::Button::new("Max Food").min_size(button_size))
+        .add_enabled(
+            enabled,
+            egui::Button::new("🍖 Max Food").min_size(button_size),
+        )
         .clicked()
     {
         inventory.food = 9999;
@@ -86,7 +95,7 @@ pub fn show(
     if ui
         .add_enabled(
             enabled,
-            egui::Button::new("Refill Arrows").min_size(button_size),
+            egui::Button::new("🏹 Refill Arrows").min_size(button_size),
         )
         .clicked()
     {
@@ -99,7 +108,7 @@ pub fn show(
     if ui
         .add_enabled(
             enabled,
-            egui::Button::new("Max Reagents").min_size(button_size),
+            egui::Button::new("🧪 Max Reagents").min_size(button_size),
         )
         .clicked()
     {

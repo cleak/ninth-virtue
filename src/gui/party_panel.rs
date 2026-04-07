@@ -9,7 +9,7 @@ pub fn show(ui: &mut egui::Ui, party: &mut [Character], mem: Option<(&dyn Memory
         return;
     }
 
-    ui.heading("Party");
+    ui.heading("⚔️ Party");
 
     TableBuilder::new(ui)
         .column(Column::auto().at_least(70.0)) // Name
@@ -25,38 +25,39 @@ pub fn show(ui: &mut egui::Ui, party: &mut [Character], mem: Option<(&dyn Memory
         .column(Column::exact(35.0)) // Lvl
         .striped(true)
         .header(20.0, |mut header| {
+            let hdr = egui::Color32::from_rgb(140, 180, 255);
             header.col(|ui| {
-                ui.strong("Name");
+                ui.colored_label(hdr, "Name");
             });
             header.col(|ui| {
-                ui.strong("Class");
+                ui.colored_label(hdr, "Class");
             });
             header.col(|ui| {
-                ui.strong("Status");
+                ui.colored_label(hdr, "Status");
             });
             header.col(|ui| {
-                ui.strong("STR");
+                ui.colored_label(hdr, "STR");
             });
             header.col(|ui| {
-                ui.strong("DEX");
+                ui.colored_label(hdr, "DEX");
             });
             header.col(|ui| {
-                ui.strong("INT");
+                ui.colored_label(hdr, "INT");
             });
             header.col(|ui| {
-                ui.strong("MP");
+                ui.colored_label(hdr, "MP");
             });
             header.col(|ui| {
-                ui.strong("HP");
+                ui.colored_label(hdr, "HP");
             });
             header.col(|ui| {
-                ui.strong("MaxHP");
+                ui.colored_label(hdr, "MaxHP");
             });
             header.col(|ui| {
-                ui.strong("XP");
+                ui.colored_label(hdr, "XP");
             });
             header.col(|ui| {
-                ui.strong("Lvl");
+                ui.colored_label(hdr, "Lvl");
             });
         })
         .body(|body| {
@@ -66,13 +67,13 @@ pub fn show(ui: &mut egui::Ui, party: &mut [Character], mem: Option<(&dyn Memory
                 let mut changed = false;
 
                 row.col(|ui| {
-                    let color = match ch.status {
-                        Status::Dead => egui::Color32::from_rgb(255, 100, 100),
-                        Status::Poisoned => egui::Color32::from_rgb(255, 255, 100),
-                        Status::Asleep => egui::Color32::from_rgb(180, 180, 180),
-                        Status::Good => ui.visuals().text_color(),
+                    let (icon, color) = match ch.status {
+                        Status::Dead => ("💀 ", egui::Color32::from_rgb(255, 100, 100)),
+                        Status::Poisoned => ("🤢 ", egui::Color32::from_rgb(255, 255, 100)),
+                        Status::Asleep => ("💤 ", egui::Color32::from_rgb(180, 180, 180)),
+                        Status::Good => ("", ui.visuals().text_color()),
                     };
-                    ui.colored_label(color, &ch.name);
+                    ui.colored_label(color, format!("{icon}{}", ch.name));
                 });
 
                 row.col(|ui| {
