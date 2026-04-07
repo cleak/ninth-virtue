@@ -4,22 +4,17 @@ use crate::game::map::MapState;
 use crate::game::world_map::WorldMap;
 use crate::tiles::atlas::{TILE_SIZE, TileAtlas};
 
-/// Zoom presets: (label, tiles per axis).
-const ZOOM_PRESETS: &[(&str, usize)] =
-    &[("Close", 16), ("Medium", 48), ("Far", 128), ("World", 256)];
-
-/// Threshold: at this zoom level or below, render full tile sprites.
-/// Above this, render 1 pixel per tile for performance.
-const DETAIL_THRESHOLD: usize = 64;
+const ZOOM_MIN: usize = 11;
+const ZOOM_MAX: usize = 256;
+const ZOOM_DEFAULT: usize = 48;
 
 pub struct MinimapState {
     pub map: Option<MapState>,
     texture: Option<TextureHandle>,
-    zoom_idx: usize,
+    zoom: usize,
     last_center: Option<(u8, u8)>,
     last_zoom: Option<usize>,
-    /// Cached color for each tile ID (0-255), sampled from atlas center pixel.
-    overview_colors: Option<[Color32; 256]>,
+    last_linear: bool,
 }
 
 impl Default for MinimapState {
@@ -27,10 +22,10 @@ impl Default for MinimapState {
         Self {
             map: None,
             texture: None,
-            zoom_idx: 1, // Medium
+            zoom: ZOOM_DEFAULT,
             last_center: None,
             last_zoom: None,
-            overview_colors: None,
+            last_linear: false,
         }
     }
 }
@@ -39,18 +34,6 @@ impl MinimapState {
     pub fn new() -> Self {
         Self::default()
     }
-}
-
-/// Build the overview color table by sampling the center pixel of each tile.
-fn build_overview_colors(atlas: &TileAtlas) -> [Color32; 256] {
-    let mut colors = [Color32::BLACK; 256];
-    for id in 0..256u16 {
-        let rgba = atlas.tile_rgba(id);
-        // Sample center pixel (row 8, col 8) of the 16x16 tile
-        let offset = (8 * TILE_SIZE + 8) * 4;
-        colors[id as usize] = Color32::from_rgb(rgba[offset], rgba[offset + 1], rgba[offset + 2]);
-    }
-    colors
 }
 
 pub fn show(
@@ -77,63 +60,84 @@ pub fn show(
     ui.horizontal(|ui| {
         ui.label(&header);
         ui.separator();
-        for (idx, &(label, _)) in ZOOM_PRESETS.iter().enumerate() {
-            if ui.selectable_label(state.zoom_idx == idx, label).clicked() {
-                state.zoom_idx = idx;
-            }
+        if ui.small_button("\u{2796}").clicked() {
+            // zoom out: show more tiles
+            state.zoom = (state.zoom * 4 / 3).min(ZOOM_MAX);
         }
+        let mut zoom_f = state.zoom as f64;
+        // Slider: left = zoomed out (many tiles), right = zoomed in (few tiles)
+        // Invert the range so right = zoomed in
+        let slider = egui::Slider::new(&mut zoom_f, ZOOM_MAX as f64..=ZOOM_MIN as f64)
+            .logarithmic(true)
+            .show_value(false)
+            .clamping(egui::SliderClamping::Always);
+        if ui.add(slider).changed() {
+            state.zoom = zoom_f as usize;
+        }
+        if ui.small_button("\u{2795}").clicked() {
+            // zoom in: show fewer tiles
+            state.zoom = (state.zoom * 3 / 4).max(ZOOM_MIN);
+        }
+        ui.label(format!("{}x{}", state.zoom, state.zoom));
     });
 
-    let zoom = ZOOM_PRESETS[state.zoom_idx].1;
+    let zoom = state.zoom;
     let cx = map.x;
     let cy = map.y;
 
-    // Build overview colors lazily
-    if state.overview_colors.is_none() {
-        state.overview_colors = Some(build_overview_colors(atlas));
-    }
+    // Determine display size to choose filtering mode
+    let avail = ui.available_size();
+    let display_side = avail.x.min(avail.y);
 
-    // Rebuild texture when center or zoom changes
-    let needs_rebuild = state.last_center != Some((cx, cy)) || state.last_zoom != Some(zoom);
+    // Choose filter: LINEAR when texture > display (downscaling), NEAREST otherwise
+    let tex_pixels = zoom * TILE_SIZE;
+    let use_linear = tex_pixels as f32 > display_side;
+
+    // Rebuild texture when center, zoom, or filter mode changes
+    let needs_rebuild = state.last_center != Some((cx, cy))
+        || state.last_zoom != Some(zoom)
+        || state.last_linear != use_linear;
 
     if needs_rebuild {
         let image = if let Some(wm) =
             world_map.filter(|_| map.location == crate::game::map::LocationType::Overworld)
         {
-            if zoom <= DETAIL_THRESHOLD {
-                build_detail_image(wm, atlas, cx, cy, zoom)
-            } else {
-                build_overview_image(wm, state.overview_colors.as_ref().unwrap(), cx, cy, zoom)
-            }
+            build_detail_image(wm, atlas, cx, cy, zoom)
         } else {
-            // Fallback: render from the 32x32 in-memory tile grid
             let scroll_x = map.scroll_x;
             let scroll_y = map.scroll_y;
             build_memory_image(&map.tiles, atlas, cx, cy, scroll_x, scroll_y)
         };
 
-        match state.texture {
-            Some(ref mut tex) => tex.set(image, TextureOptions::NEAREST),
-            None => {
-                state.texture = Some(ui.ctx().load_texture(
-                    "minimap",
-                    image,
-                    TextureOptions::NEAREST,
-                ));
+        let tex_opts = if use_linear {
+            TextureOptions::LINEAR
+        } else {
+            TextureOptions::NEAREST
+        };
+
+        // Must recreate texture handle when filter mode changes
+        if state.last_linear != use_linear {
+            state.texture = Some(ui.ctx().load_texture("minimap", image, tex_opts));
+        } else {
+            match state.texture {
+                Some(ref mut tex) => tex.set(image, tex_opts),
+                None => {
+                    state.texture = Some(ui.ctx().load_texture("minimap", image, tex_opts));
+                }
             }
         }
+
         state.last_center = Some((cx, cy));
         state.last_zoom = Some(zoom);
+        state.last_linear = use_linear;
     }
 
     // Display the texture, centered and square
     if let Some(ref texture) = state.texture {
-        let avail = ui.available_size();
-        let side = avail.x.min(avail.y);
         ui.vertical_centered(|ui| {
             ui.image(egui::load::SizedTexture::new(
                 texture.id(),
-                egui::vec2(side, side),
+                egui::vec2(display_side, display_side),
             ));
         });
     }
@@ -192,47 +196,6 @@ fn build_detail_image(
     }
 }
 
-/// Overview rendering: each tile is 1 pixel. Used for zoom > 64.
-fn build_overview_image(
-    world: &WorldMap,
-    colors: &[Color32; 256],
-    center_x: u8,
-    center_y: u8,
-    zoom: usize,
-) -> ColorImage {
-    let img_side = zoom;
-    let mut pixels = vec![Color32::BLACK; img_side * img_side];
-    let half = zoom as i32 / 2;
-
-    for vy in 0..zoom {
-        for vx in 0..zoom {
-            let wx = center_x as i32 - half + vx as i32;
-            let wy = center_y as i32 - half + vy as i32;
-            if wx < 0 || wy < 0 || wx > 255 || wy > 255 {
-                continue;
-            }
-
-            let tile_id = world.get_tile(wx as u8, wy as u8);
-            pixels[vy * img_side + vx] = colors[tile_id as usize];
-        }
-    }
-
-    // Player marker: 3x3 bright cross at center
-    let c = half as usize;
-    let marker = Color32::from_rgb(255, 255, 0);
-    for d in 0..3 {
-        set_px(&mut pixels, img_side, c + d, c, marker);
-        set_px(&mut pixels, img_side, c.wrapping_sub(d), c, marker);
-        set_px(&mut pixels, img_side, c, c + d, marker);
-        set_px(&mut pixels, img_side, c, c.wrapping_sub(d), marker);
-    }
-
-    ColorImage {
-        size: [img_side, img_side],
-        pixels,
-    }
-}
-
 /// Fallback rendering from the 32x32 in-memory tile grid (for towns/dungeons).
 fn build_memory_image(
     tiles: &[u8; 1024],
@@ -249,7 +212,7 @@ fn build_memory_image(
     let pbx = player_x.wrapping_sub(scroll_x) as i32;
     let pby = player_y.wrapping_sub(scroll_y) as i32;
     let half = grid_side as i32 / 2;
-    let origin_x = (pbx - half).clamp(0, 0); // grid is only 32 wide
+    let origin_x = (pbx - half).clamp(0, 0);
     let origin_y = (pby - half).clamp(0, 0);
 
     for vy in 0..grid_side {
@@ -279,7 +242,6 @@ fn build_memory_image(
         }
     }
 
-    // Player marker
     let marker_vx = pbx.clamp(0, grid_side as i32 - 1) as usize;
     let marker_vy = pby.clamp(0, grid_side as i32 - 1) as usize;
     draw_marker(&mut pixels, img_side, marker_vx, marker_vy, TILE_SIZE);
@@ -303,7 +265,6 @@ fn draw_marker(
     let yellow = Color32::from_rgb(255, 255, 0);
     let red = Color32::from_rgb(255, 0, 0);
 
-    // Yellow border (2px)
     for i in 0..tile_px {
         for t in 0..2 {
             set_px(pixels, img_side, tx + i, ty + t, yellow);
@@ -312,7 +273,6 @@ fn draw_marker(
             set_px(pixels, img_side, tx + tile_px - 1 - t, ty + i, yellow);
         }
     }
-    // Red cross
     let cx = tx + tile_px / 2;
     let cy = ty + tile_px / 2;
     for d in 0..4 {
