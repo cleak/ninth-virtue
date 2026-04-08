@@ -55,8 +55,15 @@ impl TileAtlas {
         Ok(Self { data })
     }
 
+    /// Raw RGBA data for all 512 tiles, laid out sequentially.
+    /// Total size: 512 * 16 * 16 * 4 = 524,288 bytes.
+    pub fn raw_data(&self) -> &[u8] {
+        &self.data
+    }
+
     /// Get the RGBA pixel data for a tile by ID (0-511).
     /// Returns a 16x16x4 = 1024 byte slice.
+    #[allow(dead_code)] // public API, currently used only in tests
     pub fn tile_rgba(&self, tile_id: u16) -> &[u8] {
         let idx = (tile_id as usize) % TILE_COUNT;
         let start = idx * RGBA_PER_TILE;
