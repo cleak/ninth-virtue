@@ -110,9 +110,18 @@ fn read_process_command_line(handle: HANDLE) -> Result<String> {
 
         // Step 4: Read the CommandLine UNICODE_STRING buffer
         let byte_len = params.CommandLine.Length as usize;
+        let max_byte_len = params.CommandLine.MaximumLength as usize;
         if byte_len == 0 || params.CommandLine.Buffer.0.is_null() {
             anyhow::bail!("command line is empty or null");
         }
+        anyhow::ensure!(
+            byte_len.is_multiple_of(2),
+            "command line length is not UTF-16 aligned: {byte_len}"
+        );
+        anyhow::ensure!(
+            byte_len <= max_byte_len,
+            "command line length {byte_len} exceeds maximum {max_byte_len}"
+        );
         let char_len = byte_len / 2;
         let mut buf = vec![0u16; char_len];
         ReadProcessMemory(

@@ -230,6 +230,9 @@ impl UltimaCompanion {
         self.party.clear();
         self.inventory = Inventory::default();
         self.minimap.map = None;
+        self.game_dir = None;
+        self.tile_atlas = None;
+        self.world_map = None;
         self.status_msg = "Process terminated".to_string();
     }
 

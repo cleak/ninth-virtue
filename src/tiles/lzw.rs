@@ -170,4 +170,27 @@ mod tests {
         let result = decompress(&data).unwrap();
         assert_eq!(result.len(), 0);
     }
+
+    #[test]
+    fn reject_invalid_code_above_next_free() {
+        // Header: uncompressed length = 10.
+        // Emit literal 0x00, then a code far above next_free (e.g., 0x1FF = 511).
+        // Literal 0x00 is 9 bits: 000000000 → byte0 = 0x00, plus 1 bit in byte1.
+        // Code 0x1FF is 9 bits: 111111111 → shifted by 9 bits from start.
+        //   bits 0-8: 0x00 (literal 0), bits 9-17: 0x1FF
+        //   byte0 = bits 0-7 = 0x00
+        //   byte1 = bit 8 of code0 (0) | bits 0-6 of code1 (1111111) << 1 = 0xFE
+        //   byte2 = bits 7-8 of code1 (11) = 0x03
+        let data = vec![10, 0, 0, 0, 0x00, 0xFE, 0x03];
+        let result = decompress(&data);
+        assert!(result.is_err(), "should reject code > next_free");
+    }
+
+    #[test]
+    fn reject_truncated_stream() {
+        // Header declares 100 bytes but only has 1 byte of compressed data
+        let data = vec![100, 0, 0, 0, 0x00];
+        let result = decompress(&data);
+        assert!(result.is_err(), "should reject truncated stream");
+    }
 }
