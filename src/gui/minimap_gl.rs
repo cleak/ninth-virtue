@@ -296,9 +296,9 @@ impl MinimapGl {
             gl.bind_vertex_array(None);
 
             // Clean up bindings
-            gl.active_texture(glow::TEXTURE0);
-            gl.bind_texture(glow::TEXTURE_2D, None);
             gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.use_program(None);
         }
