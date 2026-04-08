@@ -21,7 +21,7 @@ impl WorldMap {
         let ovl = std::fs::read(&ovl_path)
             .with_context(|| format!("failed to read {}", ovl_path.display()))?;
         anyhow::ensure!(
-            ovl.len() > DATA_OVL_CHUNK_FLAGS + 256,
+            ovl.len() >= DATA_OVL_CHUNK_FLAGS + 256,
             "DATA.OVL too small ({} bytes)",
             ovl.len()
         );

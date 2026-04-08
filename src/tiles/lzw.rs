@@ -49,7 +49,7 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
 
     loop {
         // Read next code from the bitstream (LSB-first)
-        let code = read_code(compressed, bits_read, code_size);
+        let code = read_code(compressed, bits_read, code_size)?;
         bits_read += code_size;
 
         if code == END_CODE {
@@ -68,11 +68,15 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
         let is_known = code < next_free;
         let decode_code = if is_known {
             code
-        } else {
+        } else if code == next_free {
             // KwKwK case: code == next_free, decode prev_code and append its first byte
             prev_code.ok_or_else(|| {
                 anyhow::anyhow!("invalid LZW stream: unknown code {code} with no previous code")
             })?
+        } else {
+            anyhow::bail!(
+                "invalid LZW stream: code {code} exceeds next dictionary entry {next_free}"
+            );
         };
 
         // Decode the string for decode_code by walking the prefix chain
@@ -121,13 +125,19 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Read a variable-width code from the bitstream at the given bit offset.
-/// LSB-first packing (like GIF).
-fn read_code(data: &[u8], bits_read: u32, code_size: u32) -> u16 {
+/// LSB-first packing (like GIF). Returns error if the stream is truncated.
+fn read_code(data: &[u8], bits_read: u32, code_size: u32) -> Result<u16> {
+    let bits_needed = (bits_read + code_size) as usize;
+    ensure!(
+        bits_needed <= data.len() * 8,
+        "truncated LZW stream at bit {bits_read}"
+    );
+
     let byte_offset = (bits_read / 8) as usize;
     let bit_offset = bits_read % 8;
 
     // Read up to 3 bytes to cover codes spanning byte boundaries
-    let b0 = *data.get(byte_offset).unwrap_or(&0) as u32;
+    let b0 = data[byte_offset] as u32;
     let b1 = *data.get(byte_offset + 1).unwrap_or(&0) as u32;
     let b2 = if code_size + bit_offset > 16 {
         *data.get(byte_offset + 2).unwrap_or(&0) as u32
@@ -138,7 +148,7 @@ fn read_code(data: &[u8], bits_read: u32, code_size: u32) -> u16 {
     let combined = b0 | (b1 << 8) | (b2 << 16);
     let shifted = combined >> bit_offset;
     let mask = (1u32 << code_size) - 1;
-    (shifted & mask) as u16
+    Ok((shifted & mask) as u16)
 }
 
 #[cfg(test)]

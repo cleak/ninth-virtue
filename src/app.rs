@@ -414,7 +414,8 @@ impl eframe::App for UltimaCompanion {
                     ui.set_min_width(ui.available_width());
                     if let Some(atlas) = tile_atlas.as_ref() {
                         gui::minimap_panel::show(ui, minimap, atlas, world_map.as_ref());
-                    } else {
+                    } else if attached.is_some() {
+                        // Only show load errors when actually attached to a process
                         let status = match game_dir {
                             Some(dir) => format!("Tiles not found in {}", dir.display()),
                             None => "Game directory not found — could not locate DOSBox config"

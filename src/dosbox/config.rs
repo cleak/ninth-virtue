@@ -55,6 +55,14 @@ pub fn find_game_directory(handle: HANDLE) -> Result<PathBuf> {
 }
 
 /// Read the command line of a remote process via NtQueryInformationProcess.
+///
+/// # Limitations
+/// - Only works when both processes have the same bitness (both 64-bit or both
+///   32-bit). Reading PEB from a 32-bit process in a 64-bit companion would
+///   require WOW64-specific struct layouts.
+/// - Relative paths in the command line (e.g., `-conf .\dosbox.conf`) resolve
+///   against the companion's CWD, not the DOSBox process's. In practice, GOG
+///   and Steam launchers use absolute paths.
 fn read_process_command_line(handle: HANDLE) -> Result<String> {
     unsafe {
         // Step 1: Get PEB address
