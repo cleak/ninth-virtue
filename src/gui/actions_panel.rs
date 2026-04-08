@@ -1,5 +1,7 @@
 use crate::game::character::{Character, Status, write_character};
 use crate::game::inventory::{Inventory, write_inventory};
+use crate::game::offsets::FRIGATE_MAX_HULL;
+use crate::game::vehicle::{Frigate, write_frigate_hull};
 use crate::memory::access::MemoryAccess;
 
 const HEADING_COLOR: egui::Color32 = egui::Color32::from_rgb(100, 220, 180);
@@ -12,6 +14,7 @@ pub fn show(
     ui: &mut egui::Ui,
     party: &mut [Character],
     inventory: &mut Inventory,
+    frigates: &mut [Frigate],
     mem: Option<(&dyn MemoryAccess, usize)>,
 ) -> bool {
     let mut wrote = false;
@@ -43,6 +46,13 @@ pub fn show(
             ch.status = Status::Good;
             if let Some((mem, base)) = mem {
                 let _ = write_character(mem, base, ch);
+                wrote = true;
+            }
+        }
+        for f in frigates.iter_mut() {
+            f.hull = FRIGATE_MAX_HULL;
+            if let Some((mem, base)) = mem {
+                let _ = write_frigate_hull(mem, base, f);
                 wrote = true;
             }
         }

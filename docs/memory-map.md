@@ -128,6 +128,31 @@ The two bitmasks encode four quest phases per virtue:
 | 1 | 1 | Codex read — return to shrine |
 | 0 | 1 | Complete (ordained bit cleared on turn-in) |
 
+### Object / Vehicle Table (save offset 0x6B4)
+
+32 entries x 8 bytes each. Contains monsters, NPCs, and vehicles
+(frigates, skiffs, carpets, horses). Slot 0 is the party avatar.
+
+| Entry Offset | Type | Field |
+|--------------|------|-------|
+| `0x00` | u8 | Tile sprite (add 0x100 for full tile index) |
+| `0x01` | u8 | Animation frame tile (add 0x100) |
+| `0x02` | u8 | X coordinate |
+| `0x03` | u8 | Y coordinate |
+| `0x04` | u8 | Floor / Z level |
+| `0x05` | u8 | Depends1 — frigate: **hull HP** |
+| `0x06` | u8 | Depends2 |
+| `0x07` | u8 | Depends3 — frigate: **skiffs aboard** |
+
+**Frigate tile bytes** (sprite index minus 0x100):
+- `0x20`–`0x27` (32–39): Regular ships (sails up/down x 4 directions)
+- `0x2C`–`0x2F` (44–47): Pirate ships (4 directions)
+
+**Other vehicle tiles:**
+- `0x28`–`0x2B` (40–43): Skiffs
+- `0x1B` (27): Magic carpet (unmounted)
+- `0x10`–`0x11` (16–17): Horses (unmounted)
+
 ### Game Mode Values (save offset 0x2ED / DS:0x5893)
 
 | Value | Mode |

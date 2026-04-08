@@ -46,6 +46,36 @@ pub const INV_REAGENTS: usize = 0x2AA;
 pub const INV_PARTY_SIZE: usize = 0x2B5;
 pub const INV_KARMA: usize = 0x2E2;
 
+// Vehicle/object table (save offset 0x6B4): 32 entries x 8 bytes each.
+// Contains monsters, NPCs, and vehicles (frigates, skiffs, etc.).
+pub const OBJECT_TABLE: usize = 0x6B4;
+pub const OBJECT_TABLE_SLOTS: usize = 32;
+pub const OBJECT_ENTRY_SIZE: usize = 8;
+
+// Object entry field offsets within each 8-byte entry
+pub const OBJ_TILE1: usize = 0; // sprite tile (add 0x100 for full index)
+#[allow(dead_code)] // included for completeness with the 8-byte entry format
+pub const OBJ_TILE2: usize = 1; // animation frame tile
+pub const OBJ_X: usize = 2;
+pub const OBJ_Y: usize = 3;
+#[allow(dead_code)] // included for completeness with the 8-byte entry format
+pub const OBJ_FLOOR: usize = 4;
+pub const OBJ_DEPENDS1: usize = 5; // frigate: hull HP
+#[allow(dead_code)] // included for completeness with the 8-byte entry format
+pub const OBJ_DEPENDS2: usize = 6;
+pub const OBJ_DEPENDS3: usize = 7; // frigate: skiffs aboard
+
+// Frigate tile byte ranges (sprite index minus 0x100):
+//   32..=39 = regular ships (with/without sails, 4 directions)
+//   44..=47 = pirate ships (4 directions)
+pub const SHIP_TILE_MIN: u8 = 32;
+pub const SHIP_TILE_MAX: u8 = 39;
+pub const PIRATE_TILE_MIN: u8 = 44;
+pub const PIRATE_TILE_MAX: u8 = 47;
+
+/// Maximum hull HP for a frigate (per Ultima V game logic).
+pub const FRIGATE_MAX_HULL: u8 = 99;
+
 // Game state flags (save offsets) — used for labeling in debug tools.
 pub const ACTIVE_PLAYER: usize = 0x2D5;
 pub const ANIM_NEXT_FRAME: usize = 0x2EB;
@@ -64,6 +94,11 @@ pub const fn char_addr(dos_base: usize, char_index: usize, field_offset: usize) 
 /// Compute the absolute address of an inventory field.
 pub const fn inv_addr(dos_base: usize, save_offset: usize) -> usize {
     dos_base + SAVE_BASE + save_offset
+}
+
+/// Compute the absolute address of an object table entry field.
+pub const fn obj_addr(dos_base: usize, slot: usize, field_offset: usize) -> usize {
+    dos_base + SAVE_BASE + OBJECT_TABLE + (slot * OBJECT_ENTRY_SIZE) + field_offset
 }
 
 /// Return a human-readable label for a save-relative offset, if known.

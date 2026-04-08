@@ -8,6 +8,7 @@ use crate::game::injection::{self, PatchState};
 use crate::game::inventory::{Inventory, read_inventory};
 use crate::game::map;
 use crate::game::quest::{ShrineQuest, read_shrine_quest};
+use crate::game::vehicle::{self, Frigate};
 use crate::game::world_map::WorldMap;
 use crate::gui;
 use crate::gui::memory_watch_panel::MemoryWatch;
@@ -39,6 +40,7 @@ pub struct UltimaCompanion {
     party: Vec<Character>,
     inventory: Inventory,
     shrine_quest: ShrineQuest,
+    frigates: Vec<Frigate>,
     minimap: MinimapState,
     game_dir: Option<PathBuf>,
     tile_atlas: Option<TileAtlas>,
@@ -78,6 +80,7 @@ impl UltimaCompanion {
             party: Vec::new(),
             inventory: Inventory::default(),
             shrine_quest: ShrineQuest::default(),
+            frigates: Vec::new(),
             minimap: MinimapState::new(),
             game_dir: None,
             tile_atlas: None,
@@ -204,6 +207,7 @@ impl UltimaCompanion {
         self.party.clear();
         self.inventory = Inventory::default();
         self.shrine_quest = ShrineQuest::default();
+        self.frigates.clear();
         self.minimap.map = None;
         self.game_dir = None;
         self.tile_atlas = None;
@@ -263,6 +267,7 @@ impl UltimaCompanion {
         self.party.clear();
         self.inventory = Inventory::default();
         self.shrine_quest = ShrineQuest::default();
+        self.frigates.clear();
         self.minimap.map = None;
         self.game_dir = None;
         self.tile_atlas = None;
@@ -334,6 +339,15 @@ impl UltimaCompanion {
             Ok(sq) => self.shrine_quest = sq,
             Err(e) => {
                 self.status_msg = format!("Read shrine quest failed: {e}");
+                return;
+            }
+        }
+
+        match vehicle::read_frigates(mem, dos_base) {
+            Ok(f) => self.frigates = f,
+            Err(e) => {
+                self.frigates.clear();
+                self.status_msg = format!("Read frigates failed: {e}");
                 return;
             }
         }
@@ -440,6 +454,7 @@ impl eframe::App for UltimaCompanion {
             party,
             inventory,
             shrine_quest,
+            frigates,
             minimap,
             tile_atlas,
             world_map,
@@ -487,7 +502,8 @@ impl eframe::App for UltimaCompanion {
         egui::CentralPanel::default().show(ctx, |ui| {
             gui::section_frame(ui).show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                game_written |= gui::party_panel::show(ui, party, mem);
+                game_written |=
+                    gui::party_panel::show(ui, party, frigates, minimap.map.as_ref(), mem);
             });
 
             ui.add_space(4.0);
@@ -503,7 +519,7 @@ impl eframe::App for UltimaCompanion {
                 });
                 gui::section_frame(&cols[2]).show(&mut cols[2], |ui| {
                     ui.set_min_size(ui.available_size());
-                    game_written |= gui::actions_panel::show(ui, party, inventory, mem);
+                    game_written |= gui::actions_panel::show(ui, party, inventory, frigates, mem);
                     ui.add_space(8.0);
                     gui::audio_panel::show(ui, audio_session, audio_volume, audio_muted);
                 });
