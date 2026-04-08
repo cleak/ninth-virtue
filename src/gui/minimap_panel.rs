@@ -1,31 +1,52 @@
-use egui::{Color32, ColorImage, TextureHandle, TextureOptions};
+use std::sync::{Arc, Mutex};
 
-use crate::game::map::MapState;
+use egui::epaint::PaintCallbackInfo;
+
+use crate::game::map::{LocationType, MapState};
 use crate::game::world_map::WorldMap;
-use crate::tiles::atlas::{TILE_SIZE, TileAtlas};
+use crate::tiles::atlas::TileAtlas;
+
+use super::minimap_gl::MinimapGl;
 
 const ZOOM_MIN: usize = 11;
 const ZOOM_MAX: usize = 256;
 const ZOOM_DEFAULT: usize = 48;
 
+/// Shared state accessed by both the UI thread (for updates) and the paint
+/// callback (for rendering). Protected by a mutex.
+struct GpuState {
+    renderer: Option<MinimapGl>,
+    grid_dirty: bool,
+    grid_data: Vec<u8>,
+    grid_dims: (u32, u32),
+    player_tile: [f32; 2],
+}
+
 pub struct MinimapState {
     pub map: Option<MapState>,
-    texture: Option<TextureHandle>,
+    gpu: Arc<Mutex<GpuState>>,
+    /// Raw sequential atlas RGBA, captured once from TileAtlas for lazy GPU upload.
+    raw_atlas: Option<Arc<Vec<u8>>>,
     zoom: usize,
     last_center: Option<(u8, u8)>,
     last_zoom: Option<usize>,
-    last_linear: bool,
 }
 
 impl Default for MinimapState {
     fn default() -> Self {
         Self {
             map: None,
-            texture: None,
+            gpu: Arc::new(Mutex::new(GpuState {
+                renderer: None,
+                grid_dirty: false,
+                grid_data: Vec::new(),
+                grid_dims: (0, 0),
+                player_tile: [0.0, 0.0],
+            })),
+            raw_atlas: None,
             zoom: ZOOM_DEFAULT,
             last_center: None,
             last_zoom: None,
-            last_linear: false,
         }
     }
 }
@@ -49,6 +70,11 @@ pub fn show(
         return;
     };
 
+    // Capture raw atlas data once for lazy GPU upload
+    if state.raw_atlas.is_none() {
+        state.raw_atlas = Some(Arc::new(atlas.raw_data().to_vec()));
+    }
+
     // Header
     let header = if map.z == 0xFF {
         format!("{} ({}, {})", map.location.name(), map.x, map.y)
@@ -61,12 +87,9 @@ pub fn show(
         ui.label(&header);
         ui.separator();
         if ui.small_button("\u{2796}").clicked() {
-            // zoom out: show more tiles
             state.zoom = (state.zoom * 4 / 3).min(ZOOM_MAX);
         }
         let mut zoom_f = state.zoom as f64;
-        // Slider: left = zoomed out (many tiles), right = zoomed in (few tiles)
-        // Invert the range so right = zoomed in
         let slider = egui::Slider::new(&mut zoom_f, ZOOM_MAX as f64..=ZOOM_MIN as f64)
             .logarithmic(true)
             .show_value(false)
@@ -75,7 +98,6 @@ pub fn show(
             state.zoom = zoom_f as usize;
         }
         if ui.small_button("\u{2795}").clicked() {
-            // zoom in: show fewer tiles
             state.zoom = (state.zoom * 3 / 4).max(ZOOM_MIN);
         }
         ui.label(format!("{}x{}", state.zoom, state.zoom));
@@ -85,62 +107,79 @@ pub fn show(
     let cx = map.x;
     let cy = map.y;
 
-    // Determine display size to choose filtering mode
-    let avail = ui.available_size();
-    let display_side = avail.x.min(avail.y);
+    // Prepare tile grid data on CPU when map state changes
+    let needs_update = state.last_center != Some((cx, cy)) || state.last_zoom != Some(zoom);
 
-    // Choose filter: LINEAR when texture > display (downscaling), NEAREST otherwise
-    let tex_pixels = zoom * TILE_SIZE;
-    let use_linear = tex_pixels as f32 > display_side;
+    if needs_update {
+        let (grid_data, grid_w, grid_h, player_tile) =
+            if let Some(wm) = world_map.filter(|_| map.location == LocationType::Overworld) {
+                let grid = extract_overworld_grid(wm, cx, cy, zoom);
+                let half = zoom as f32 / 2.0;
+                (grid, zoom as u32, zoom as u32, [half, half])
+            } else {
+                let grid = linearize_town_grid(&map.tiles);
+                let pbx = map.x.wrapping_sub(map.scroll_x) as f32;
+                let pby = map.y.wrapping_sub(map.scroll_y) as f32;
+                (grid, 32, 32, [pbx, pby])
+            };
 
-    // Rebuild texture when center, zoom, or filter mode changes
-    let needs_rebuild = state.last_center != Some((cx, cy))
-        || state.last_zoom != Some(zoom)
-        || state.last_linear != use_linear;
-
-    if needs_rebuild {
-        let image = if let Some(wm) =
-            world_map.filter(|_| map.location == crate::game::map::LocationType::Overworld)
-        {
-            build_detail_image(wm, atlas, cx, cy, zoom)
-        } else {
-            let scroll_x = map.scroll_x;
-            let scroll_y = map.scroll_y;
-            build_memory_image(&map.tiles, atlas, cx, cy, scroll_x, scroll_y)
-        };
-
-        let tex_opts = if use_linear {
-            TextureOptions::LINEAR
-        } else {
-            TextureOptions::NEAREST
-        };
-
-        // Must recreate texture handle when filter mode changes
-        if state.last_linear != use_linear {
-            state.texture = Some(ui.ctx().load_texture("minimap", image, tex_opts));
-        } else {
-            match state.texture {
-                Some(ref mut tex) => tex.set(image, tex_opts),
-                None => {
-                    state.texture = Some(ui.ctx().load_texture("minimap", image, tex_opts));
-                }
-            }
-        }
+        let mut gpu = state.gpu.lock().unwrap();
+        gpu.grid_data = grid_data;
+        gpu.grid_dims = (grid_w, grid_h);
+        gpu.player_tile = player_tile;
+        gpu.grid_dirty = true;
 
         state.last_center = Some((cx, cy));
         state.last_zoom = Some(zoom);
-        state.last_linear = use_linear;
     }
 
-    // Display the texture, centered and square
-    if let Some(ref texture) = state.texture {
-        ui.vertical_centered(|ui| {
-            ui.image(egui::load::SizedTexture::new(
-                texture.id(),
-                egui::vec2(display_side, display_side),
-            ));
+    // Allocate a centered square region for the minimap
+    let avail = ui.available_size();
+    let side = avail.x.min(avail.y);
+
+    // Issue paint callback inside centered layout
+    let gpu = state.gpu.clone();
+    let raw_atlas = state.raw_atlas.clone().unwrap();
+
+    ui.vertical_centered(|ui| {
+        let (rect, _response) =
+            ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
+
+        let callback = egui_glow::CallbackFn::new(move |info: PaintCallbackInfo, painter| {
+            let gl = painter.gl();
+            let mut gpu = gpu.lock().unwrap();
+
+            // Lazy-init: create renderer and upload atlas on first callback
+            if gpu.renderer.is_none() {
+                gpu.renderer = Some(MinimapGl::new(gl, &raw_atlas));
+                // Force grid upload on first frame
+                gpu.grid_dirty = true;
+            }
+
+            // Upload grid texture if dirty
+            if gpu.grid_dirty {
+                gpu.renderer.as_ref().unwrap().update_grid(
+                    gl,
+                    &gpu.grid_data,
+                    gpu.grid_dims.0,
+                    gpu.grid_dims.1,
+                );
+                gpu.grid_dirty = false;
+            }
+
+            let grid_size = [gpu.grid_dims.0 as f32, gpu.grid_dims.1 as f32];
+            let player_tile = gpu.player_tile;
+            gpu.renderer
+                .as_ref()
+                .unwrap()
+                .paint(gl, &info, grid_size, player_tile);
         });
-    }
+
+        ui.painter().add(egui::PaintCallback {
+            rect,
+            callback: Arc::new(callback),
+        });
+    });
 }
 
 pub fn show_no_atlas(ui: &mut egui::Ui, status: &str) {
@@ -149,129 +188,31 @@ pub fn show_no_atlas(ui: &mut egui::Ui, status: &str) {
     });
 }
 
-/// Render the overworld from the WorldMap: each tile is 16x16 pixels.
-fn build_detail_image(
-    world: &WorldMap,
-    atlas: &TileAtlas,
-    center_x: u8,
-    center_y: u8,
-    zoom: usize,
-) -> ColorImage {
-    let img_side = zoom * TILE_SIZE;
-    let mut pixels = vec![Color32::BLACK; img_side * img_side];
+/// Extract a zoom x zoom window from the overworld centered on (cx, cy), wrapping at 256.
+fn extract_overworld_grid(world: &WorldMap, cx: u8, cy: u8, zoom: usize) -> Vec<u8> {
     let half = zoom as i32 / 2;
-
+    let mut grid = vec![0u8; zoom * zoom];
     for vy in 0..zoom {
         for vx in 0..zoom {
-            let wx = (center_x as i32 - half + vx as i32).rem_euclid(256) as u8;
-            let wy = (center_y as i32 - half + vy as i32).rem_euclid(256) as u8;
-
-            let tile_id = world.get_tile(wx, wy) as u16;
-            let rgba = atlas.tile_rgba(tile_id);
-
-            for py in 0..TILE_SIZE {
-                for px in 0..TILE_SIZE {
-                    let src = (py * TILE_SIZE + px) * 4;
-                    let dst = (vy * TILE_SIZE + py) * img_side + (vx * TILE_SIZE + px);
-                    pixels[dst] = Color32::from_rgb(rgba[src], rgba[src + 1], rgba[src + 2]);
-                }
-            }
+            let wx = (cx as i32 - half + vx as i32).rem_euclid(256) as u8;
+            let wy = (cy as i32 - half + vy as i32).rem_euclid(256) as u8;
+            grid[vy * zoom + vx] = world.get_tile(wx, wy);
         }
     }
-
-    draw_marker(
-        &mut pixels,
-        img_side,
-        half as usize,
-        half as usize,
-        TILE_SIZE,
-    );
-
-    ColorImage {
-        size: [img_side, img_side],
-        pixels,
-    }
+    grid
 }
 
-/// Fallback rendering from the 32x32 in-memory tile grid (for towns/dungeons).
-fn build_memory_image(
-    tiles: &[u8; 1024],
-    atlas: &TileAtlas,
-    player_x: u8,
-    player_y: u8,
-    scroll_x: u8,
-    scroll_y: u8,
-) -> ColorImage {
-    let grid_side: usize = 32;
-    let img_side = grid_side * TILE_SIZE;
-    let mut pixels = vec![Color32::BLACK; img_side * img_side];
-
-    // Render all 32x32 tiles from the chunked memory grid
-    for gy in 0..grid_side {
-        for gx in 0..grid_side {
+/// Linearize the chunked 32x32 town/dungeon tile grid to row-major order.
+fn linearize_town_grid(tiles: &[u8; 1024]) -> Vec<u8> {
+    let mut grid = vec![0u8; 32 * 32];
+    for gy in 0..32usize {
+        for gx in 0..32usize {
             let cx = gx / 16;
             let cy = gy / 16;
             let lx = gx % 16;
             let ly = gy % 16;
-            let tile_id = tiles[(cy * 2 + cx) * 256 + ly * 16 + lx] as u16;
-            let rgba = atlas.tile_rgba(tile_id);
-
-            for py in 0..TILE_SIZE {
-                for px in 0..TILE_SIZE {
-                    let src = (py * TILE_SIZE + px) * 4;
-                    let dst = (gy * TILE_SIZE + py) * img_side + (gx * TILE_SIZE + px);
-                    pixels[dst] = Color32::from_rgb(rgba[src], rgba[src + 1], rgba[src + 2]);
-                }
-            }
+            grid[gy * 32 + gx] = tiles[(cy * 2 + cx) * 256 + ly * 16 + lx];
         }
     }
-
-    // Player marker at their position within the buffer
-    let pbx = player_x.wrapping_sub(scroll_x) as usize;
-    let pby = player_y.wrapping_sub(scroll_y) as usize;
-    let marker_vx = pbx.min(grid_side - 1);
-    let marker_vy = pby.min(grid_side - 1);
-    draw_marker(&mut pixels, img_side, marker_vx, marker_vy, TILE_SIZE);
-
-    ColorImage {
-        size: [img_side, img_side],
-        pixels,
-    }
-}
-
-/// Draw a yellow border + red cross marker on a tile at view position (vx, vy).
-fn draw_marker(
-    pixels: &mut [Color32],
-    img_side: usize,
-    tile_vx: usize,
-    tile_vy: usize,
-    tile_px: usize,
-) {
-    let tx = tile_vx * tile_px;
-    let ty = tile_vy * tile_px;
-    let yellow = Color32::from_rgb(255, 255, 0);
-    let red = Color32::from_rgb(255, 0, 0);
-
-    for i in 0..tile_px {
-        for t in 0..2 {
-            set_px(pixels, img_side, tx + i, ty + t, yellow);
-            set_px(pixels, img_side, tx + i, ty + tile_px - 1 - t, yellow);
-            set_px(pixels, img_side, tx + t, ty + i, yellow);
-            set_px(pixels, img_side, tx + tile_px - 1 - t, ty + i, yellow);
-        }
-    }
-    let cx = tx + tile_px / 2;
-    let cy = ty + tile_px / 2;
-    for d in 0..4 {
-        set_px(pixels, img_side, cx + d, cy, red);
-        set_px(pixels, img_side, cx.wrapping_sub(d), cy, red);
-        set_px(pixels, img_side, cx, cy + d, red);
-        set_px(pixels, img_side, cx, cy.wrapping_sub(d), red);
-    }
-}
-
-fn set_px(pixels: &mut [Color32], stride: usize, x: usize, y: usize, c: Color32) {
-    if x < stride && y < stride {
-        pixels[y * stride + x] = c;
-    }
+    grid
 }

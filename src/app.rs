@@ -77,7 +77,7 @@ impl UltimaCompanion {
             last_rescan: Instant::now(),
             suppress_auto_attach: false,
             auto_refresh: true,
-            refresh_interval_secs: 1.0,
+            refresh_interval_secs: 0.025,
             last_refresh: Instant::now(),
             status_msg: "Searching for DOSBox...".to_string(),
             patch_state: None,
