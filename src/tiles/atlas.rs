@@ -151,8 +151,8 @@ mod tests {
         // Tile with alternating black (0) and white (F): byte = 0x0F
         let mut raw = vec![0u8; RAW_FILE_SIZE];
         // Fill tile 0 with 0x0F pattern
-        for i in 0..BYTES_PER_TILE {
-            raw[i] = 0x0F;
+        for byte in raw.iter_mut().take(BYTES_PER_TILE) {
+            *byte = 0x0F;
         }
 
         let rgba = decode_raw_tiles(&raw).unwrap();

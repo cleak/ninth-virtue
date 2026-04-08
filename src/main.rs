@@ -3,6 +3,7 @@ mod audio;
 mod dosbox;
 mod game;
 mod gui;
+mod icon;
 mod memory;
 mod tiles;
 
@@ -18,7 +19,8 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([800.0, 1000.0])
-            .with_title("The Ninth Virtue"),
+            .with_title("The Ninth Virtue")
+            .with_icon(icon::load_app_icon()),
         ..Default::default()
     };
     eframe::run_native(
