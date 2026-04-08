@@ -112,6 +112,22 @@ Character N base: save offset `0x02 + N * 0x20`.
 | `0x301` | `0x58A7` | u8 | Torch duration (turns) |
 | `0x3B0` | `0x5B56` | u8 | New prompt at end of turn |
 
+### Shrine Quest Progress
+
+| Save Offset | DS Offset | Type | Field |
+|-------------|-----------|------|-------|
+| `0x326` | `0x58CC` | u8 | Ordained shrines (bitmask: bit 0=Honesty, 1=Compassion, 2=Valor, 3=Justice, 4=Sacrifice, 5=Honor, 6=Spirituality, 7=Humility) |
+| `0x328` | `0x58CE` | u8 | Codex visited (same bit layout as ordained) |
+
+The two bitmasks encode four quest phases per virtue:
+
+| Ordained | Codex | Phase |
+|----------|-------|-------|
+| 0 | 0 | Not Started |
+| 1 | 0 | Ordained — visit the Codex |
+| 1 | 1 | Codex read — return to shrine |
+| 0 | 1 | Complete (ordained bit cleared on turn-in) |
+
 ### Game Mode Values (save offset 0x2ED / DS:0x5893)
 
 | Value | Mode |

@@ -52,6 +52,10 @@ pub const ANIM_NEXT_FRAME: usize = 0x2EB;
 pub const UPDATE_MAP: usize = 0x2FE;
 pub const NEW_PROMPT: usize = 0x3B0;
 
+// Shrine quest progress (save offsets)
+pub const SHRINE_ORDAINED: usize = 0x326;
+pub const SHRINE_CODEX_VISITED: usize = 0x328;
+
 /// Compute the absolute address of a character field.
 pub const fn char_addr(dos_base: usize, char_index: usize, field_offset: usize) -> usize {
     dos_base + SAVE_BASE + CHAR_RECORDS_OFFSET + (char_index * CHAR_RECORD_SIZE) + field_offset
@@ -108,6 +112,8 @@ pub fn label_for_save_offset(offset: usize) -> Option<&'static str> {
         0x300 => Some("light_spell_dur"),
         0x301 => Some("torch_dur"),
         NEW_PROMPT => Some("NEW_PROMPT"),
+        SHRINE_ORDAINED => Some("shrine_ordained"),
+        SHRINE_CODEX_VISITED => Some("shrine_codex_visited"),
         _ => None,
     }
 }
