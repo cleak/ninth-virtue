@@ -161,7 +161,8 @@ fn read_objects(mem: &dyn MemoryAccess, dos_base: usize) -> Result<Vec<ObjectEnt
     let mut objects = Vec::new();
     for rec in raw.chunks_exact(OBJECT_ENTRY_SIZE) {
         let tile = rec[OBJ_TILE1];
-        if tile == 0 {
+        // 0x00 = empty slot, 0x1D/0x1E = dead/gone sentinel markers
+        if matches!(tile, 0 | 0x1D | 0x1E) {
             continue;
         }
         objects.push(ObjectEntry {
