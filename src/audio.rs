@@ -55,6 +55,10 @@ impl AudioSession {
 
 /// Initialize COM for the current thread (apartment-threaded, matching egui's
 /// single-thread model). Call once from `main()` before the event loop.
+///
+/// Returns `Ok(())` if COM was successfully initialized or was already
+/// initialized with a compatible threading model. Returns an error if COM
+/// was already initialized with an incompatible model (e.g., multi-threaded).
 pub fn init_com() -> Result<()> {
     unsafe {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED)
