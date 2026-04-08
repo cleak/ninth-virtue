@@ -51,9 +51,10 @@ void main() {
 
     frag_color = texture(u_atlas, atlas_uv);
 
-    // Player marker overlay
-    vec2 marker_min = u_player_tile / u_grid_size;
-    vec2 marker_max = (u_player_tile + 1.0) / u_grid_size;
+    // Player marker overlay (snap to tile boundary for odd zoom values)
+    vec2 marker_tile = floor(u_player_tile);
+    vec2 marker_min = marker_tile / u_grid_size;
+    vec2 marker_max = (marker_tile + 1.0) / u_grid_size;
 
     if (v_uv.x >= marker_min.x && v_uv.x < marker_max.x &&
         v_uv.y >= marker_min.y && v_uv.y < marker_max.y) {
