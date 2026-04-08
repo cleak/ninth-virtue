@@ -246,6 +246,7 @@ impl MinimapGl {
                 glow::UNSIGNED_BYTE,
                 glow::PixelUnpackData::Slice(Some(tile_ids)),
             );
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
             gl.bind_texture(glow::TEXTURE_2D, None);
         }
     }
