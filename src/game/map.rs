@@ -2,7 +2,8 @@ use anyhow::Result;
 
 use crate::game::offsets::{
     MAP_LOCATION, MAP_SCROLL_X, MAP_SCROLL_Y, MAP_TILES, MAP_TILES_LEN, MAP_TRANSPORT, MAP_X,
-    MAP_Y, MAP_Z, inv_addr,
+    MAP_Y, MAP_Z, OBJ_TILE1, OBJ_X, OBJ_Y, OBJECT_ENTRY_SIZE, OBJECT_TABLE, OBJECT_TABLE_SLOTS,
+    inv_addr,
 };
 use crate::memory::access::MemoryAccess;
 
@@ -107,6 +108,21 @@ pub struct MapState {
     pub scroll_y: u8,
     /// 32x32 tile grid stored as 4 chunks of 16x16.
     pub tiles: [u8; MAP_TILES_LEN],
+    /// Active objects on the map (NPCs, monsters, vehicles).
+    /// Each entry has a tile byte (add 0x100 for the full tile index) and position.
+    pub objects: Vec<ObjectEntry>,
+}
+
+/// An object from the 32-slot object table (save offset 0x6B4).
+///
+/// Represents anything rendered on the map that isn't terrain:
+/// the party avatar (slot 0), vehicles, NPCs, and monsters.
+#[derive(Debug, Clone)]
+pub struct ObjectEntry {
+    /// Tile byte from field +0 (add 0x100 for the full tile atlas index).
+    pub tile: u8,
+    pub x: u8,
+    pub y: u8,
 }
 
 /// Read the current map state from DOSBox memory.
@@ -122,6 +138,8 @@ pub fn read_map_state(mem: &dyn MemoryAccess, dos_base: usize) -> Result<MapStat
     let mut tiles = [0u8; MAP_TILES_LEN];
     mem.read_bytes(inv_addr(dos_base, MAP_TILES), &mut tiles)?;
 
+    let objects = read_objects(mem, dos_base).unwrap_or_default();
+
     Ok(MapState {
         location: LocationType::from_id(location_id),
         z,
@@ -131,7 +149,29 @@ pub fn read_map_state(mem: &dyn MemoryAccess, dos_base: usize) -> Result<MapStat
         scroll_x,
         scroll_y,
         tiles,
+        objects,
     })
+}
+
+/// Read active objects from the 32-slot object table as a single snapshot.
+fn read_objects(mem: &dyn MemoryAccess, dos_base: usize) -> Result<Vec<ObjectEntry>> {
+    let mut raw = [0u8; OBJECT_TABLE_SLOTS * OBJECT_ENTRY_SIZE];
+    mem.read_bytes(inv_addr(dos_base, OBJECT_TABLE), &mut raw)?;
+
+    let mut objects = Vec::new();
+    for rec in raw.chunks_exact(OBJECT_ENTRY_SIZE) {
+        let tile = rec[OBJ_TILE1];
+        // 0x00 = empty slot, 0x1D/0x1E = dead/gone sentinel markers
+        if matches!(tile, 0 | 0x1D | 0x1E) {
+            continue;
+        }
+        objects.push(ObjectEntry {
+            tile,
+            x: rec[OBJ_X],
+            y: rec[OBJ_Y],
+        });
+    }
+    Ok(objects)
 }
 
 #[cfg(test)]
@@ -185,5 +225,6 @@ mod tests {
         assert_eq!(state.y, 50);
         assert_eq!(state.tiles[0], 0x01); // water
         assert_eq!(state.tiles[1], 0x05); // grass
+        assert!(state.objects.is_empty()); // no objects written
     }
 }
