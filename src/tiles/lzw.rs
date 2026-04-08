@@ -120,6 +120,11 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
         }
     }
 
+    ensure!(
+        output.len() >= uncompressed_len,
+        "LZW stream ended early: produced {} bytes, expected {uncompressed_len}",
+        output.len()
+    );
     output.truncate(uncompressed_len);
     Ok(output)
 }

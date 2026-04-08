@@ -155,6 +155,10 @@ pub fn parse_conf_path(cmdline: &str) -> Option<PathBuf> {
 
 /// Parse the `[autoexec]` section of a DOSBox config file for `mount` commands.
 /// Returns a list of (drive_letter, host_path) pairs.
+///
+/// Assumes standard DOSBox syntax: `mount <drive> <path> [options...]`.
+/// Non-standard option placement (e.g., `mount D -t cdrom "E:\cdrom"`) is not
+/// handled but is mitigated by `validate_game_dir` rejecting invalid directories.
 pub fn parse_autoexec_mounts(conf_path: &Path) -> Result<Vec<(char, PathBuf)>> {
     let content = std::fs::read_to_string(conf_path)
         .with_context(|| format!("failed to read config: {}", conf_path.display()))?;
@@ -253,13 +257,18 @@ mod tests {
         assert_eq!(path_str, r"C:\Games\dosbox.conf");
     }
 
+    /// Create a unique temp file path for test isolation (PID-scoped).
+    fn test_conf(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("ninth_{}_{name}.conf", std::process::id()))
+    }
+
     #[test]
     fn parse_autoexec_mounts_basic() {
         let conf = "[autoexec]\nmount C \"D:\\Games\\Ultima5\"\nC:\nULTIMA5.EXE\n";
-        let dir = std::env::temp_dir().join("ninth_test_dosbox.conf");
-        std::fs::write(&dir, conf).unwrap();
-        let mounts = parse_autoexec_mounts(&dir).unwrap();
-        std::fs::remove_file(&dir).unwrap();
+        let path = test_conf("mounts_basic");
+        std::fs::write(&path, conf).unwrap();
+        let mounts = parse_autoexec_mounts(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
 
         assert_eq!(mounts.len(), 1);
         assert_eq!(mounts[0].0, 'C');
@@ -269,10 +278,10 @@ mod tests {
     #[test]
     fn parse_autoexec_mounts_multiple() {
         let conf = "[sdl]\nfullscreen=false\n\n[autoexec]\nmount C /games/u5\nmount D /cdrom\nC:\n";
-        let dir = std::env::temp_dir().join("ninth_test_dosbox2.conf");
-        std::fs::write(&dir, conf).unwrap();
-        let mounts = parse_autoexec_mounts(&dir).unwrap();
-        std::fs::remove_file(&dir).unwrap();
+        let path = test_conf("mounts_multi");
+        std::fs::write(&path, conf).unwrap();
+        let mounts = parse_autoexec_mounts(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
 
         assert_eq!(mounts.len(), 2);
         assert_eq!(mounts[0].0, 'C');
@@ -282,10 +291,10 @@ mod tests {
     #[test]
     fn parse_autoexec_stops_at_next_section() {
         let conf = "[autoexec]\nmount C /games\n[serial]\n";
-        let dir = std::env::temp_dir().join("ninth_test_dosbox3.conf");
-        std::fs::write(&dir, conf).unwrap();
-        let mounts = parse_autoexec_mounts(&dir).unwrap();
-        std::fs::remove_file(&dir).unwrap();
+        let path = test_conf("mounts_section");
+        std::fs::write(&path, conf).unwrap();
+        let mounts = parse_autoexec_mounts(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
 
         assert_eq!(mounts.len(), 1);
     }
