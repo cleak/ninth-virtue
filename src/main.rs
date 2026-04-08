@@ -1,13 +1,15 @@
 mod app;
+mod dosbox;
 mod game;
 mod gui;
 mod memory;
+mod tiles;
 
 fn main() -> eframe::Result {
     env_logger::init();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([800.0, 600.0])
+            .with_inner_size([800.0, 1000.0])
             .with_title("The Ninth Virtue"),
         ..Default::default()
     };

@@ -1,13 +1,19 @@
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use crate::dosbox::config;
 use crate::game::character::{Character, read_party};
 use crate::game::injection::{self, PatchState};
 use crate::game::inventory::{Inventory, read_inventory};
+use crate::game::map;
+use crate::game::world_map::WorldMap;
 use crate::gui;
 use crate::gui::memory_watch_panel::MemoryWatch;
+use crate::gui::minimap_panel::MinimapState;
 use crate::memory::access::MemoryAccess;
 use crate::memory::process::{self, DosBoxProcess};
 use crate::memory::scanner;
+use crate::tiles::atlas::TileAtlas;
 
 pub struct AttachedProcess {
     pub process: DosBoxProcess,
@@ -30,6 +36,10 @@ pub struct UltimaCompanion {
     // Game state (cached)
     party: Vec<Character>,
     inventory: Inventory,
+    minimap: MinimapState,
+    game_dir: Option<PathBuf>,
+    tile_atlas: Option<TileAtlas>,
+    world_map: Option<WorldMap>,
 
     // Timing
     last_process_scan: Instant,
@@ -59,6 +69,10 @@ impl UltimaCompanion {
             attached: None,
             party: Vec::new(),
             inventory: Inventory::default(),
+            minimap: MinimapState::new(),
+            game_dir: None,
+            tile_atlas: None,
+            world_map: None,
             last_process_scan: Instant::now(),
             last_rescan: Instant::now(),
             suppress_auto_attach: false,
@@ -119,6 +133,35 @@ impl UltimaCompanion {
                     }
                 }
 
+                // Try to locate game data files and load tile atlas + world map
+                match config::find_game_directory(proc.memory.handle()) {
+                    Ok(dir) => {
+                        match TileAtlas::load(&dir) {
+                            Ok(atlas) => {
+                                self.tile_atlas = Some(atlas);
+                                // Only load the world map if the atlas succeeded
+                                match WorldMap::load(&dir) {
+                                    Ok(wm) => self.world_map = Some(wm),
+                                    Err(e) => {
+                                        self.status_msg = format!(
+                                            "World map failed: {e} (dir: {})",
+                                            dir.display()
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                self.status_msg =
+                                    format!("Tiles failed: {e} (dir: {})", dir.display());
+                            }
+                        }
+                        self.game_dir = Some(dir);
+                    }
+                    Err(e) => {
+                        self.status_msg = format!("Game dir not found: {e}");
+                    }
+                }
+
                 self.selected_pid = Some(pid);
                 self.attached = Some(AttachedProcess {
                     process: proc,
@@ -147,6 +190,10 @@ impl UltimaCompanion {
         self.attached = None;
         self.party.clear();
         self.inventory = Inventory::default();
+        self.minimap.map = None;
+        self.game_dir = None;
+        self.tile_atlas = None;
+        self.world_map = None;
         self.suppress_auto_attach = true;
         self.status_msg = "Disconnected".to_string();
     }
@@ -182,6 +229,10 @@ impl UltimaCompanion {
         self.attached = None;
         self.party.clear();
         self.inventory = Inventory::default();
+        self.minimap.map = None;
+        self.game_dir = None;
+        self.tile_atlas = None;
+        self.world_map = None;
         self.status_msg = "Process terminated".to_string();
     }
 
@@ -240,6 +291,13 @@ impl UltimaCompanion {
             Err(e) => {
                 self.status_msg = format!("Read inventory failed: {e}");
                 return;
+            }
+        }
+
+        match map::read_map_state(mem, dos_base) {
+            Ok(ms) => self.minimap.map = Some(ms),
+            Err(e) => {
+                self.status_msg = format!("Read map failed: {e}");
             }
         }
 
@@ -333,6 +391,10 @@ impl eframe::App for UltimaCompanion {
             attached,
             party,
             inventory,
+            minimap,
+            tile_atlas,
+            world_map,
+            game_dir,
             patch_state,
             memory_watch,
             ..
@@ -346,6 +408,28 @@ impl eframe::App for UltimaCompanion {
         // --- Memory watch window ---
         gui::memory_watch_panel::show(ctx, memory_watch, mem);
 
+        // --- Mini-map (anchored bottom panel) ---
+        egui::TopBottomPanel::bottom("minimap")
+            .min_height(300.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                gui::section_frame(ui).show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    if let Some(atlas) = tile_atlas.as_ref() {
+                        gui::minimap_panel::show(ui, minimap, atlas, world_map.as_ref());
+                    } else if attached.is_some() {
+                        // Only show load errors when actually attached to a process
+                        let status = match game_dir {
+                            Some(dir) => format!("Tiles not found in {}", dir.display()),
+                            None => "Game directory not found — could not locate DOSBox config"
+                                .to_string(),
+                        };
+                        gui::minimap_panel::show_no_atlas(ui, &status);
+                    }
+                });
+            });
+
+        // --- Party, inventory, actions ---
         let mut game_written = false;
 
         egui::CentralPanel::default().show(ctx, |ui| {

@@ -1,0 +1,201 @@
+//! LZW decompressor for Origin Systems (Ultima V/VI) compressed files.
+//!
+//! Format: GIF-style variable-width LZW with LSB-first bit packing.
+//! File layout: `u32le uncompressed_length | compressed_data[]`
+
+use anyhow::{Result, ensure};
+
+const CLEAR_CODE: u16 = 0x100;
+const END_CODE: u16 = 0x101;
+const FIRST_ENTRY: u16 = 0x102;
+
+const INITIAL_CODE_SIZE: u32 = 9;
+const MAX_CODE_SIZE: u32 = 12;
+const MAX_DICT_SIZE: usize = 1 << MAX_CODE_SIZE; // 4096
+
+/// Decompress an Origin Systems LZW-compressed file.
+///
+/// Input format: 4-byte LE uncompressed length, followed by compressed data.
+pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
+    ensure!(data.len() >= 4, "LZW data too short for header");
+
+    let uncompressed_len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    ensure!(
+        uncompressed_len <= 16 * 1024 * 1024,
+        "uncompressed length {uncompressed_len} too large"
+    );
+
+    let compressed = &data[4..];
+    let mut output = Vec::with_capacity(uncompressed_len);
+
+    // Dictionary: each entry is (prefix_code, append_byte).
+    // For codes 0-255, the entry is the literal byte itself.
+    // We store the full decoded string lazily via recursion through prefix chains.
+    let mut dict_prefix = vec![0u16; MAX_DICT_SIZE];
+    let mut dict_byte = vec![0u8; MAX_DICT_SIZE];
+    let mut dict_len = vec![0u16; MAX_DICT_SIZE]; // length of decoded string
+
+    let mut code_size = INITIAL_CODE_SIZE;
+    let mut dict_size = 1u32 << code_size; // 512
+    let mut next_free = FIRST_ENTRY;
+    let mut bits_read = 0u32;
+    let mut prev_code: Option<u16> = None;
+
+    // Initialize literal entries
+    for i in 0u16..256 {
+        dict_byte[i as usize] = i as u8;
+        dict_len[i as usize] = 1;
+    }
+
+    loop {
+        // Read next code from the bitstream (LSB-first)
+        let code = read_code(compressed, bits_read, code_size)?;
+        bits_read += code_size;
+
+        if code == END_CODE {
+            break;
+        }
+
+        if code == CLEAR_CODE {
+            code_size = INITIAL_CODE_SIZE;
+            dict_size = 1 << code_size;
+            next_free = FIRST_ENTRY;
+            prev_code = None;
+            continue;
+        }
+
+        // Determine the string to output
+        let is_known = code < next_free;
+        let decode_code = if is_known {
+            code
+        } else if code == next_free {
+            // KwKwK case: code == next_free, decode prev_code and append its first byte
+            prev_code.ok_or_else(|| {
+                anyhow::anyhow!("invalid LZW stream: unknown code {code} with no previous code")
+            })?
+        } else {
+            anyhow::bail!(
+                "invalid LZW stream: code {code} exceeds next dictionary entry {next_free}"
+            );
+        };
+
+        // Decode the string for decode_code by walking the prefix chain
+        let string_len = dict_len[decode_code as usize] as usize;
+        let out_start = output.len();
+
+        // Reserve space and decode backwards
+        output.resize(out_start + string_len, 0);
+        let mut c = decode_code;
+        for i in (0..string_len).rev() {
+            output[out_start + i] = dict_byte[c as usize];
+            c = dict_prefix[c as usize];
+        }
+
+        if !is_known {
+            // KwKwK: append the first byte of the decoded string
+            output.push(output[out_start]);
+        }
+
+        // Add new dictionary entry: prev_code + first byte of current output
+        if let Some(prev) = prev_code
+            && (next_free as usize) < MAX_DICT_SIZE
+        {
+            let first_byte = output[out_start];
+            dict_prefix[next_free as usize] = prev;
+            dict_byte[next_free as usize] = first_byte;
+            dict_len[next_free as usize] = dict_len[prev as usize] + 1;
+            next_free += 1;
+
+            // Grow code size when dictionary reaches current capacity
+            if next_free as u32 >= dict_size && code_size < MAX_CODE_SIZE {
+                code_size += 1;
+                dict_size = 1 << code_size;
+            }
+        }
+
+        prev_code = Some(code);
+
+        if output.len() >= uncompressed_len {
+            break;
+        }
+    }
+
+    ensure!(
+        output.len() >= uncompressed_len,
+        "LZW stream ended early: produced {} bytes, expected {uncompressed_len}",
+        output.len()
+    );
+    output.truncate(uncompressed_len);
+    Ok(output)
+}
+
+/// Read a variable-width code from the bitstream at the given bit offset.
+/// LSB-first packing (like GIF). Returns error if the stream is truncated.
+fn read_code(data: &[u8], bits_read: u32, code_size: u32) -> Result<u16> {
+    let bits_needed = (bits_read + code_size) as usize;
+    ensure!(
+        bits_needed <= data.len() * 8,
+        "truncated LZW stream at bit {bits_read}"
+    );
+
+    let byte_offset = (bits_read / 8) as usize;
+    let bit_offset = bits_read % 8;
+
+    // Read up to 3 bytes to cover codes spanning byte boundaries
+    let b0 = data[byte_offset] as u32;
+    let b1 = *data.get(byte_offset + 1).unwrap_or(&0) as u32;
+    let b2 = if code_size + bit_offset > 16 {
+        *data.get(byte_offset + 2).unwrap_or(&0) as u32
+    } else {
+        0
+    };
+
+    let combined = b0 | (b1 << 8) | (b2 << 16);
+    let shifted = combined >> bit_offset;
+    let mask = (1u32 << code_size) - 1;
+    Ok((shifted & mask) as u16)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reject_too_short() {
+        assert!(decompress(&[0, 0, 0]).is_err());
+    }
+
+    #[test]
+    fn decompress_trivial_end_code() {
+        // Header: uncompressed length = 0, then END_CODE (0x101) as 9-bit LSB-first.
+        // 0x101 in binary = 100000001. LSB-first into bytes:
+        //   byte[0] = bits 0-7 = 0b00000001 = 0x01
+        //   byte[1] = bit 8    = 0b00000001 = 0x01
+        let data = vec![0, 0, 0, 0, 0x01, 0x01];
+        let result = decompress(&data).unwrap();
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn reject_invalid_code_above_next_free() {
+        // Header: uncompressed length = 10.
+        // Emit literal 0x00, then a code far above next_free (e.g., 0x1FF = 511).
+        // Literal 0x00 is 9 bits: 000000000 → byte0 = 0x00, plus 1 bit in byte1.
+        // Code 0x1FF is 9 bits: 111111111 → shifted by 9 bits from start.
+        //   bits 0-8: 0x00 (literal 0), bits 9-17: 0x1FF
+        //   byte0 = bits 0-7 = 0x00
+        //   byte1 = bit 8 of code0 (0) | bits 0-6 of code1 (1111111) << 1 = 0xFE
+        //   byte2 = bits 7-8 of code1 (11) = 0x03
+        let data = vec![10, 0, 0, 0, 0x00, 0xFE, 0x03];
+        let result = decompress(&data);
+        assert!(result.is_err(), "should reject code > next_free");
+    }
+
+    #[test]
+    fn reject_truncated_stream() {
+        // Header declares 100 bytes but only has 1 byte of compressed data
+        let data = vec![100, 0, 0, 0, 0x00];
+        let result = decompress(&data);
+        assert!(result.is_err(), "should reject truncated stream");
+    }
+}

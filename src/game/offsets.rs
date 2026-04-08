@@ -24,6 +24,17 @@ pub const CHAR_LEVEL: usize = 0x16;
 pub const CHAR_EQUIPMENT: usize = 0x19;
 pub const CHAR_EQUIPMENT_LEN: usize = 6;
 
+// Map and position save offsets (add SAVE_BASE for DOS address)
+pub const MAP_TRANSPORT: usize = 0x2D6;
+pub const MAP_LOCATION: usize = 0x2ED;
+pub const MAP_Z: usize = 0x2EF;
+pub const MAP_X: usize = 0x2F0;
+pub const MAP_Y: usize = 0x2F1;
+pub const MAP_SCROLL_X: usize = 0x2F5;
+pub const MAP_SCROLL_Y: usize = 0x2F6;
+pub const MAP_TILES: usize = 0x1062;
+pub const MAP_TILES_LEN: usize = 1024;
+
 // Inventory save offsets (add SAVE_BASE for DOS address)
 pub const INV_FOOD: usize = 0x202;
 pub const INV_GOLD: usize = 0x204;
