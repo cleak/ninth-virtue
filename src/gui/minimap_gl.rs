@@ -319,6 +319,12 @@ impl MinimapGl {
 
 /// Rearrange sequential tile RGBA data into a 2D atlas texture (32 cols x 16 rows).
 fn rearrange_atlas(sequential_rgba: &[u8]) -> Vec<u8> {
+    const EXPECTED_LEN: usize = TILE_COUNT * TILE_SIZE * TILE_SIZE * 4;
+    assert_eq!(
+        sequential_rgba.len(),
+        EXPECTED_LEN,
+        "atlas RGBA data must be exactly {EXPECTED_LEN} bytes"
+    );
     let stride = ATLAS_WIDTH as usize * 4;
     let mut buf = vec![0u8; stride * ATLAS_HEIGHT as usize];
 
