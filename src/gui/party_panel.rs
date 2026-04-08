@@ -1,12 +1,29 @@
 use egui_extras::{Column, TableBuilder};
 
 use crate::game::character::{Character, Status};
+use crate::game::map::MapState;
+use crate::game::offsets::FRIGATE_MAX_HULL;
+use crate::game::vehicle::{Frigate, is_frigate_tile, write_frigate_hull, write_frigate_skiffs};
 use crate::memory::access::MemoryAccess;
+
+/// Find the frigate the party is currently aboard, if any.
+fn current_ship<'a>(
+    frigates: &'a mut [Frigate],
+    map: Option<&MapState>,
+) -> Option<&'a mut Frigate> {
+    let map = map?;
+    if !is_frigate_tile(map.transport) {
+        return None;
+    }
+    frigates.iter_mut().find(|f| f.x == map.x && f.y == map.y)
+}
 
 /// Returns `true` if any character data was written to game memory.
 pub fn show(
     ui: &mut egui::Ui,
     party: &mut [Character],
+    frigates: &mut [Frigate],
+    map: Option<&MapState>,
     mem: Option<(&dyn MemoryAccess, usize)>,
 ) -> bool {
     let mut wrote = false;
@@ -187,5 +204,38 @@ pub fn show(
                 }
             });
         });
+
+    // Show current ship stats when the party is aboard a frigate
+    if let Some(ship) = current_ship(frigates, map) {
+        let ship_color = egui::Color32::from_rgb(120, 200, 220);
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.label(egui::RichText::new(format!("⛵ {} Hull:", ship.label())).color(ship_color));
+            if ui
+                .add(egui::DragValue::new(&mut ship.hull).range(0..=FRIGATE_MAX_HULL))
+                .changed()
+                && let Some((mem, dos_base)) = mem
+            {
+                let _ = write_frigate_hull(mem, dos_base, ship);
+                wrote = true;
+            }
+            ui.label(format!("/ {FRIGATE_MAX_HULL}"));
+
+            if !ship.is_pirate() {
+                ui.add_space(12.0);
+                ui.label(egui::RichText::new("Skiffs:").color(ship_color));
+                if ui
+                    .add(egui::DragValue::new(&mut ship.skiffs).range(0..=u8::MAX))
+                    .changed()
+                    && let Some((mem, dos_base)) = mem
+                {
+                    let _ = write_frigate_skiffs(mem, dos_base, ship);
+                    wrote = true;
+                }
+            }
+        });
+    }
+
     wrote
 }
