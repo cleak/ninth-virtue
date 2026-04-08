@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use egui::epaint::PaintCallbackInfo;
 
-use crate::game::map::{LocationType, MapState};
+use crate::game::map::{LocationType, MapState, ObjectEntry};
 use crate::game::world_map::WorldMap;
 use crate::tiles::atlas::TileAtlas;
 
@@ -18,6 +18,7 @@ struct GpuState {
     renderer: Option<MinimapGl>,
     grid_dirty: bool,
     grid_data: Vec<u8>,
+    objects_data: Vec<u8>,
     grid_dims: (u32, u32),
     player_tile: [f32; 2],
 }
@@ -40,6 +41,7 @@ impl Default for MinimapState {
                 renderer: None,
                 grid_dirty: false,
                 grid_data: Vec::new(),
+                objects_data: Vec::new(),
                 grid_dims: (0, 0),
                 player_tile: [0.0, 0.0],
             })),
@@ -107,8 +109,11 @@ pub fn show(
     let cx = map.x;
     let cy = map.y;
 
-    // Prepare tile grid data on CPU when map state changes
-    let needs_update = state.last_center != Some((cx, cy)) || state.last_zoom != Some(zoom);
+    // Prepare tile grid data on CPU when map state changes.
+    // Object positions change every game turn, so always update when objects are present.
+    let has_objects = !map.objects.is_empty();
+    let needs_update =
+        state.last_center != Some((cx, cy)) || state.last_zoom != Some(zoom) || has_objects;
 
     if needs_update {
         let (grid_data, grid_w, grid_h, player_tile) =
@@ -123,8 +128,12 @@ pub fn show(
                 (grid, 32, 32, [pbx, pby])
             };
 
+        let objects_data =
+            build_objects_overlay(&map.objects, grid_w as usize, grid_h as usize, map);
+
         let mut gpu = state.gpu.lock().unwrap();
         gpu.grid_data = grid_data;
+        gpu.objects_data = objects_data;
         gpu.grid_dims = (grid_w, grid_h);
         gpu.player_tile = player_tile;
         gpu.grid_dirty = true;
@@ -156,14 +165,11 @@ pub fn show(
                 gpu.grid_dirty = true;
             }
 
-            // Upload grid texture if dirty
+            // Upload grid and objects textures if dirty
             if gpu.grid_dirty {
-                gpu.renderer.as_ref().unwrap().update_grid(
-                    gl,
-                    &gpu.grid_data,
-                    gpu.grid_dims.0,
-                    gpu.grid_dims.1,
-                );
+                let renderer = gpu.renderer.as_ref().unwrap();
+                renderer.update_grid(gl, &gpu.grid_data, gpu.grid_dims.0, gpu.grid_dims.1);
+                renderer.update_objects(gl, &gpu.objects_data, gpu.grid_dims.0, gpu.grid_dims.1);
                 gpu.grid_dirty = false;
             }
 
@@ -215,4 +221,38 @@ fn linearize_town_grid(tiles: &[u8; 1024]) -> Vec<u8> {
         }
     }
     grid
+}
+
+/// Build an object overlay grid (same dimensions as the tile grid).
+///
+/// Each cell is 0 (no object) or the object's tile byte. The shader adds 256
+/// to get the animated-page sprite from the atlas.
+fn build_objects_overlay(
+    objects: &[ObjectEntry],
+    grid_w: usize,
+    grid_h: usize,
+    map: &MapState,
+) -> Vec<u8> {
+    let mut overlay = vec![0u8; grid_w * grid_h];
+    let half = grid_w as i32 / 2;
+    let overworld = map.location == LocationType::Overworld;
+
+    for obj in objects {
+        let (gx, gy) = if overworld {
+            let vx = (obj.x as i32 - map.x as i32 + half).rem_euclid(256);
+            let vy = (obj.y as i32 - map.y as i32 + half).rem_euclid(256);
+            (vx, vy)
+        } else {
+            (
+                obj.x.wrapping_sub(map.scroll_x) as i32,
+                obj.y.wrapping_sub(map.scroll_y) as i32,
+            )
+        };
+
+        if gx >= 0 && gx < grid_w as i32 && gy >= 0 && gy < grid_h as i32 {
+            overlay[gy as usize * grid_w + gx as usize] = obj.tile;
+        }
+    }
+
+    overlay
 }

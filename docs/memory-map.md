@@ -153,6 +153,11 @@ The two bitmasks encode four quest phases per virtue:
 - `0x1B` (27): Magic carpet (unmounted)
 - `0x10`–`0x11` (16–17): Horses (unmounted)
 
+**Minimap rendering:** The minimap GPU shader uses a separate R8 overlay
+texture for objects. Each cell holds the tile byte (0 = empty). The
+fragment shader adds 256 to get the animated-page sprite from the 512-tile
+atlas, skipping black (EGA 0) pixels so terrain shows through.
+
 ### Game Mode Values (save offset 0x2ED / DS:0x5893)
 
 | Value | Mode |

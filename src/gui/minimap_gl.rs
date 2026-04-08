@@ -24,6 +24,7 @@ out vec4 frag_color;
 
 uniform sampler2D u_grid;
 uniform sampler2D u_atlas;
+uniform sampler2D u_objects;
 uniform vec2 u_grid_size;
 uniform float u_atlas_cols;
 uniform float u_atlas_rows;
@@ -50,6 +51,25 @@ void main() {
     );
 
     frag_color = texture(u_atlas, atlas_uv);
+
+    // Object overlay: if an object tile is present, render its sprite on top.
+    // Object tile bytes are 0-255 in the R8 texture; the actual atlas sprite
+    // is at tile_byte + 256 (the animated page of the 512-tile atlas).
+    float obj_byte = floor(texture(u_objects, grid_uv).r * 255.0 + 0.5);
+    if (obj_byte > 0.5) {
+        float obj_tile = obj_byte + 256.0;
+        float obj_col = mod(obj_tile, u_atlas_cols);
+        float obj_row = floor(obj_tile / u_atlas_cols);
+        vec2 obj_uv = vec2(
+            (obj_col + tile_frac.x) / u_atlas_cols,
+            (obj_row + tile_frac.y) / u_atlas_rows
+        );
+        vec4 obj_color = texture(u_atlas, obj_uv);
+        // Skip black pixels (EGA color 0) to let terrain show through
+        if (obj_color.r > 0.0 || obj_color.g > 0.0 || obj_color.b > 0.0) {
+            frag_color = obj_color;
+        }
+    }
 
     // Player marker overlay (snap to tile boundary for odd zoom values)
     vec2 marker_tile = floor(u_player_tile);
@@ -105,6 +125,7 @@ pub struct MinimapGl {
     vbo: glow::Buffer,
     atlas_texture: glow::Texture,
     grid_texture: glow::Texture,
+    objects_texture: glow::Texture,
     u_grid_size: glow::UniformLocation,
     u_atlas_cols: glow::UniformLocation,
     u_atlas_rows: glow::UniformLocation,
@@ -129,8 +150,10 @@ impl MinimapGl {
             gl.use_program(Some(program));
             let u_grid = gl.get_uniform_location(program, "u_grid").unwrap();
             let u_atlas = gl.get_uniform_location(program, "u_atlas").unwrap();
+            let u_objects = gl.get_uniform_location(program, "u_objects").unwrap();
             gl.uniform_1_i32(Some(&u_grid), 0);
             gl.uniform_1_i32(Some(&u_atlas), 1);
+            gl.uniform_1_i32(Some(&u_objects), 2);
             gl.use_program(None);
 
             // Fullscreen quad VBO
@@ -192,29 +215,10 @@ impl MinimapGl {
             gl.bind_texture(glow::TEXTURE_2D, None);
 
             // Grid texture: created empty, filled later via update_grid
-            let grid_texture = gl.create_texture().unwrap();
-            gl.bind_texture(glow::TEXTURE_2D, Some(grid_texture));
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_MIN_FILTER,
-                glow::NEAREST as i32,
-            );
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_MAG_FILTER,
-                glow::NEAREST as i32,
-            );
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_WRAP_S,
-                glow::CLAMP_TO_EDGE as i32,
-            );
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_WRAP_T,
-                glow::CLAMP_TO_EDGE as i32,
-            );
-            gl.bind_texture(glow::TEXTURE_2D, None);
+            let grid_texture = create_r8_texture(gl);
+
+            // Object overlay texture: same dimensions as grid, filled via update_objects
+            let objects_texture = create_r8_texture(gl);
 
             Self {
                 program,
@@ -222,6 +226,7 @@ impl MinimapGl {
                 vbo,
                 atlas_texture,
                 grid_texture,
+                objects_texture,
                 u_grid_size,
                 u_atlas_cols,
                 u_atlas_rows,
@@ -232,28 +237,13 @@ impl MinimapGl {
 
     /// Upload a new tile grid as an R8 texture. `tile_ids` is row-major.
     pub fn update_grid(&self, gl: &glow::Context, tile_ids: &[u8], width: u32, height: u32) {
-        assert_eq!(
-            tile_ids.len(),
-            width as usize * height as usize,
-            "grid upload requires exactly width * height bytes"
-        );
-        unsafe {
-            gl.bind_texture(glow::TEXTURE_2D, Some(self.grid_texture));
-            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-            gl.tex_image_2d(
-                glow::TEXTURE_2D,
-                0,
-                glow::R8 as i32,
-                width as i32,
-                height as i32,
-                0,
-                glow::RED,
-                glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(Some(tile_ids)),
-            );
-            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
-            gl.bind_texture(glow::TEXTURE_2D, None);
-        }
+        upload_r8(gl, self.grid_texture, tile_ids, width, height);
+    }
+
+    /// Upload the object overlay grid (same dimensions as the tile grid).
+    /// Each byte is an object tile byte (0 = no object, non-zero = sprite at tile+256).
+    pub fn update_objects(&self, gl: &glow::Context, object_ids: &[u8], width: u32, height: u32) {
+        upload_r8(gl, self.objects_texture, object_ids, width, height);
     }
 
     /// Render the tilemap into the given viewport.
@@ -284,6 +274,8 @@ impl MinimapGl {
             gl.bind_texture(glow::TEXTURE_2D, Some(self.grid_texture));
             gl.active_texture(glow::TEXTURE1);
             gl.bind_texture(glow::TEXTURE_2D, Some(self.atlas_texture));
+            gl.active_texture(glow::TEXTURE2);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.objects_texture));
 
             // Set uniforms
             gl.uniform_2_f32(Some(&self.u_grid_size), grid_size[0], grid_size[1]);
@@ -297,6 +289,8 @@ impl MinimapGl {
             gl.bind_vertex_array(None);
 
             // Clean up bindings
+            gl.active_texture(glow::TEXTURE2);
+            gl.bind_texture(glow::TEXTURE_2D, None);
             gl.active_texture(glow::TEXTURE1);
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.active_texture(glow::TEXTURE0);
@@ -314,7 +308,64 @@ impl MinimapGl {
             gl.delete_buffer(self.vbo);
             gl.delete_texture(self.atlas_texture);
             gl.delete_texture(self.grid_texture);
+            gl.delete_texture(self.objects_texture);
         }
+    }
+}
+
+/// Create an empty R8 texture with NEAREST filtering and CLAMP_TO_EDGE wrapping.
+fn create_r8_texture(gl: &glow::Context) -> glow::Texture {
+    unsafe {
+        let tex = gl.create_texture().unwrap();
+        gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            glow::NEAREST as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MAG_FILTER,
+            glow::NEAREST as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_S,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_T,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        tex
+    }
+}
+
+/// Upload row-major u8 data to an R8 texture.
+fn upload_r8(gl: &glow::Context, texture: glow::Texture, data: &[u8], width: u32, height: u32) {
+    assert_eq!(
+        data.len(),
+        width as usize * height as usize,
+        "R8 upload requires exactly width * height bytes"
+    );
+    unsafe {
+        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+        gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::R8 as i32,
+            width as i32,
+            height as i32,
+            0,
+            glow::RED,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(Some(data)),
+        );
+        gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
+        gl.bind_texture(glow::TEXTURE_2D, None);
     }
 }
 
