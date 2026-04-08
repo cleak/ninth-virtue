@@ -19,7 +19,6 @@ void main() {
 "#;
 
 const FRAGMENT_SHADER: &str = r#"#version 330 core
-precision mediump float;
 in vec2 v_uv;
 out vec4 frag_color;
 
@@ -232,6 +231,11 @@ impl MinimapGl {
 
     /// Upload a new tile grid as an R8 texture. `tile_ids` is row-major.
     pub fn update_grid(&self, gl: &glow::Context, tile_ids: &[u8], width: u32, height: u32) {
+        assert_eq!(
+            tile_ids.len(),
+            width as usize * height as usize,
+            "grid upload requires exactly width * height bytes"
+        );
         unsafe {
             gl.bind_texture(glow::TEXTURE_2D, Some(self.grid_texture));
             gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
