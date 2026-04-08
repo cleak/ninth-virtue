@@ -1,4 +1,5 @@
 mod app;
+mod audio;
 mod dosbox;
 mod game;
 mod gui;
@@ -7,6 +8,13 @@ mod tiles;
 
 fn main() -> eframe::Result {
     env_logger::init();
+
+    // Initialize COM for WASAPI audio session control (apartment-threaded
+    // to match egui's single-thread model).
+    if let Err(e) = audio::init_com() {
+        eprintln!("COM init failed (audio controls unavailable): {e}");
+    }
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([800.0, 1000.0])
