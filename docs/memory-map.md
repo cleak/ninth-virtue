@@ -129,3 +129,68 @@ Character N base: save offset `0x02 + N * 0x20`.
 
 This offset is past the end of the on-disk save file (which ends
 around `0x3B2`) but within the runtime-only RAM region.
+
+## Entity / NPC Data
+
+Discovered via disassembly of ULTIMA.EXE, NPC.OVL, TOWN.OVL, and
+TALK.OVL using `scripts/find_entity_refs.py`, then confirmed at
+runtime with the `poke` memory tool.
+
+### Two-Level Entity System
+
+The game uses a two-level indirection for entities:
+
+1. **Entity slots** — position and tile data for things on the map
+2. **NPC records** — schedule, dialog, and flags per NPC (field +0x0C
+   links to an entity slot)
+
+For the minimap, only the entity slots are needed.
+
+### Entity Slots (save offset 0x6B4 / DS:0x5C5A)
+
+32 slots, 8 bytes each (256 bytes total, ending at save 0x7B4).
+**Confirmed at runtime** with `poke dump 0x6B4 256`.
+
+| Record Offset | Type | Field |
+|---------------|------|-------|
+| `+0x00` | u8 | Entity type (0 = empty). For vehicles/player: matches the transport type (0x1C = on foot, 0x24-0x2B = ships). For NPCs (>0x3F): base type masked with 0xFC for AI behavior lookup. |
+| `+0x01` | u8 | Display tile. Observed identical to field +0 for vehicles. For NPCs, the AI function may compute a different value (EXE 0x465D). Values 0x1D/0x1E = dead/gone markers. |
+| `+0x02` | u8 | X position |
+| `+0x03` | u8 | Y position |
+| `+0x04` | u8 | Unknown |
+| `+0x05` | u8 | Unknown (observed: 0x63 or 0x1F) |
+| `+0x06` | u8 | AI state (EXE 0x4575 reads this; low/high nibbles used separately) |
+| `+0x07` | u8 | Unknown (observed: 0x01, 0x02, 0x05) |
+
+**Tile rendering:** Entity tile IDs overlap with terrain tiles (0-255).
+The actual entity sprite is at `tile_id + 256` in the 512-tile atlas
+(the animated page). The game alternates between tile N (terrain) and
+tile N+256 (entity sprite) during animation; ninth-virtue always shows
+the entity sprite.
+
+**Evidence (disassembly):**
+- EXE 0x4563: `shl ax, 3; add ax, 0x5C5A` (8-byte stride, 32 slots)
+- EXE 0x3593/0x359A: field +2 = X, field +3 = Y
+- NPC.OVL 0x02C0: loop `sub di, 8; cmp di, 0x5C5A; ja` (32 slots)
+
+### NPC Records (disassembly only — not yet runtime-verified)
+
+Two parallel 32-entry tables of 16-byte records, used for town NPCs:
+
+- **NPC Records A** (save 0x9B8 / DS:0x5F5E) — current NPC state
+- **NPC Records B** (save 0x7B8 / DS:0x5D5E) — initial/default state
+
+Key fields in each 16-byte record (from disassembly):
+
+| Record Offset | Type | Field |
+|---------------|------|-------|
+| `+0x00` | u16 | Schedule type (compared to 1, 2, 3) |
+| `+0x0A` | u16 | State (compared to 0xFE, 0xFD) |
+| `+0x0C` | u16 | Entity slot index (links to entity table) |
+
+**NPC alive flags** at save 0xFF8 (DS:0x659E): 32-byte array, one per
+NPC, 0 = dead/absent.
+
+**Map buffer pointer** at save 0x5B76 (DS:0xB11C): word-sized pointer
+to the active map buffer used by NPC.OVL for entity compositing.
+

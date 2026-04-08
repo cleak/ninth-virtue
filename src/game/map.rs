@@ -1,5 +1,6 @@
 use anyhow::Result;
 
+use crate::game::entities::{self, Entity};
 use crate::game::offsets::{
     MAP_LOCATION, MAP_SCROLL_X, MAP_SCROLL_Y, MAP_TILES, MAP_TILES_LEN, MAP_TRANSPORT, MAP_X,
     MAP_Y, MAP_Z, inv_addr,
@@ -107,6 +108,8 @@ pub struct MapState {
     pub scroll_y: u8,
     /// 32x32 tile grid stored as 4 chunks of 16x16.
     pub tiles: [u8; MAP_TILES_LEN],
+    /// Active entities (NPCs, monsters, objects) on the current map.
+    pub entities: Vec<Entity>,
 }
 
 /// Read the current map state from DOSBox memory.
@@ -122,6 +125,8 @@ pub fn read_map_state(mem: &dyn MemoryAccess, dos_base: usize) -> Result<MapStat
     let mut tiles = [0u8; MAP_TILES_LEN];
     mem.read_bytes(inv_addr(dos_base, MAP_TILES), &mut tiles)?;
 
+    let entities = entities::read_entities(mem, dos_base).unwrap_or_default();
+
     Ok(MapState {
         location: LocationType::from_id(location_id),
         z,
@@ -131,6 +136,7 @@ pub fn read_map_state(mem: &dyn MemoryAccess, dos_base: usize) -> Result<MapStat
         scroll_x,
         scroll_y,
         tiles,
+        entities,
     })
 }
 
@@ -185,5 +191,6 @@ mod tests {
         assert_eq!(state.y, 50);
         assert_eq!(state.tiles[0], 0x01); // water
         assert_eq!(state.tiles[1], 0x05); // grass
+        assert!(state.entities.is_empty()); // no entities written
     }
 }

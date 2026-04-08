@@ -1,5 +1,6 @@
 use egui::{Color32, ColorImage, TextureHandle, TextureOptions};
 
+use crate::game::entities::Entity;
 use crate::game::map::MapState;
 use crate::game::world_map::WorldMap;
 use crate::tiles::atlas::{TILE_SIZE, TileAtlas};
@@ -93,20 +94,23 @@ pub fn show(
     let tex_pixels = zoom * TILE_SIZE;
     let use_linear = tex_pixels as f32 > display_side;
 
-    // Rebuild texture when center, zoom, or filter mode changes
+    // Rebuild texture when center, zoom, filter mode changes, or entities are present
+    // (entities move every turn, so always rebuild when there are any)
+    let has_entities = !map.entities.is_empty();
     let needs_rebuild = state.last_center != Some((cx, cy))
         || state.last_zoom != Some(zoom)
-        || state.last_linear != use_linear;
+        || state.last_linear != use_linear
+        || has_entities;
 
     if needs_rebuild {
         let image = if let Some(wm) =
             world_map.filter(|_| map.location == crate::game::map::LocationType::Overworld)
         {
-            build_detail_image(wm, atlas, cx, cy, zoom)
+            build_detail_image(wm, atlas, cx, cy, zoom, &map.entities)
         } else {
             let scroll_x = map.scroll_x;
             let scroll_y = map.scroll_y;
-            build_memory_image(&map.tiles, atlas, cx, cy, scroll_x, scroll_y)
+            build_memory_image(&map.tiles, atlas, cx, cy, scroll_x, scroll_y, &map.entities)
         };
 
         let tex_opts = if use_linear {
@@ -156,6 +160,7 @@ fn build_detail_image(
     center_x: u8,
     center_y: u8,
     zoom: usize,
+    entities: &[Entity],
 ) -> ColorImage {
     let img_side = zoom * TILE_SIZE;
     let mut pixels = vec![Color32::BLACK; img_side * img_side];
@@ -176,6 +181,25 @@ fn build_detail_image(
                     pixels[dst] = Color32::from_rgb(rgba[src], rgba[src + 1], rgba[src + 2]);
                 }
             }
+        }
+    }
+
+    // Draw entities as their tile sprites
+    for entity in entities {
+        let ex = entity.x as i32;
+        let ey = entity.y as i32;
+        // Convert world coords to view coords (wrapping)
+        let vx = (ex - center_x as i32 + half).rem_euclid(256);
+        let vy = (ey - center_y as i32 + half).rem_euclid(256);
+        if vx >= 0 && vx < zoom as i32 && vy >= 0 && vy < zoom as i32 {
+            draw_entity_tile(
+                &mut pixels,
+                img_side,
+                vx as usize,
+                vy as usize,
+                entity.tile_id,
+                atlas,
+            );
         }
     }
 
@@ -201,6 +225,7 @@ fn build_memory_image(
     player_y: u8,
     scroll_x: u8,
     scroll_y: u8,
+    entities: &[Entity],
 ) -> ColorImage {
     let grid_side: usize = 32;
     let img_side = grid_side * TILE_SIZE;
@@ -226,6 +251,15 @@ fn build_memory_image(
         }
     }
 
+    // Draw entities at their positions within the buffer
+    for entity in entities {
+        let ex = entity.x.wrapping_sub(scroll_x) as usize;
+        let ey = entity.y.wrapping_sub(scroll_y) as usize;
+        if ex < grid_side && ey < grid_side {
+            draw_entity_tile(&mut pixels, img_side, ex, ey, entity.tile_id, atlas);
+        }
+    }
+
     // Player marker at their position within the buffer
     let pbx = player_x.wrapping_sub(scroll_x) as usize;
     let pby = player_y.wrapping_sub(scroll_y) as usize;
@@ -236,6 +270,43 @@ fn build_memory_image(
     ColorImage {
         size: [img_side, img_side],
         pixels,
+    }
+}
+
+/// Draw an entity's tile sprite at view position (vx, vy), skipping black (EGA color 0)
+/// pixels to preserve the terrain underneath.
+fn draw_entity_tile(
+    pixels: &mut [Color32],
+    img_side: usize,
+    tile_vx: usize,
+    tile_vy: usize,
+    tile_id: u8,
+    atlas: &TileAtlas,
+) {
+    // Entity type IDs (0x1C, 0x24, etc.) overlap with terrain tiles in the
+    // 0-255 range. The actual entity sprites live in the animated page at
+    // tile_id + 256. The game's animation system alternates between the
+    // terrain tile and the entity sprite; we always show the entity sprite.
+    let rgba = atlas.tile_rgba(tile_id as u16 + 256);
+    let tx = tile_vx * TILE_SIZE;
+    let ty = tile_vy * TILE_SIZE;
+
+    for py in 0..TILE_SIZE {
+        for px in 0..TILE_SIZE {
+            let src = (py * TILE_SIZE + px) * 4;
+            let r = rgba[src];
+            let g = rgba[src + 1];
+            let b = rgba[src + 2];
+            // Skip fully black pixels (EGA color 0) to let terrain show through
+            if r == 0 && g == 0 && b == 0 {
+                continue;
+            }
+            let dst_x = tx + px;
+            let dst_y = ty + py;
+            if dst_x < img_side && dst_y < img_side {
+                pixels[dst_y * img_side + dst_x] = Color32::from_rgb(r, g, b);
+            }
+        }
     }
 }
 

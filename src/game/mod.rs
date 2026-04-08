@@ -1,4 +1,5 @@
 pub mod character;
+pub mod entities;
 pub mod injection;
 pub mod inventory;
 pub mod map;

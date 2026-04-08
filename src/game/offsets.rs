@@ -24,6 +24,16 @@ pub const CHAR_LEVEL: usize = 0x16;
 pub const CHAR_EQUIPMENT: usize = 0x19;
 pub const CHAR_EQUIPMENT_LEN: usize = 6;
 
+// Entity table save offsets (add SAVE_BASE for DOS address)
+// See entities.rs for detailed documentation and disassembly evidence.
+pub const ENTITY_TABLE: usize = 0x6B4;
+pub const ENTITY_RECORD_SIZE: usize = 8;
+pub const ENTITY_MAX_COUNT: usize = 32;
+pub const ENTITY_TYPE: usize = 0;
+pub const ENTITY_CURRENT_TILE: usize = 1;
+pub const ENTITY_X: usize = 2;
+pub const ENTITY_Y: usize = 3;
+
 // Map and position save offsets (add SAVE_BASE for DOS address)
 pub const MAP_TRANSPORT: usize = 0x2D6;
 pub const MAP_LOCATION: usize = 0x2ED;
@@ -82,6 +92,16 @@ pub fn label_for_save_offset(offset: usize) -> Option<&'static str> {
                 0x16 => Some("level"),
                 0x19..=0x1E => Some("equipment"),
                 _ => None,
+            }
+        }
+        o if (ENTITY_TABLE..ENTITY_TABLE + ENTITY_MAX_COUNT * ENTITY_RECORD_SIZE).contains(&o) => {
+            let rel = (o - ENTITY_TABLE) % ENTITY_RECORD_SIZE;
+            match rel {
+                0 => Some("entity_type"),
+                1 => Some("entity_cur_tile"),
+                2 => Some("entity_x"),
+                3 => Some("entity_y"),
+                _ => Some("entity_field"),
             }
         }
         0x202..=0x203 => Some("food"),
