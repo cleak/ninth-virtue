@@ -1,3 +1,4 @@
+pub mod audio;
 pub mod dosbox;
 pub mod game;
 pub mod gui;

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use crate::audio::AudioSession;
 use crate::dosbox::config;
 use crate::game::character::{Character, read_party};
 use crate::game::injection::{self, PatchState};
@@ -59,6 +60,11 @@ pub struct UltimaCompanion {
 
     // Debug: memory watch
     memory_watch: MemoryWatch,
+
+    // Audio volume control (WASAPI)
+    audio_session: Option<AudioSession>,
+    audio_volume: f32,
+    audio_muted: bool,
 }
 
 impl UltimaCompanion {
@@ -82,6 +88,9 @@ impl UltimaCompanion {
             status_msg: "Searching for DOSBox...".to_string(),
             patch_state: None,
             memory_watch: MemoryWatch::default(),
+            audio_session: None,
+            audio_volume: 1.0,
+            audio_muted: false,
         };
         // Scan immediately on startup so we connect without delay.
         app.scan_processes();
@@ -163,6 +172,7 @@ impl UltimaCompanion {
                 }
 
                 self.selected_pid = Some(pid);
+                self.try_acquire_audio(pid);
                 self.attached = Some(AttachedProcess {
                     process: proc,
                     dos_base,
@@ -194,6 +204,7 @@ impl UltimaCompanion {
         self.game_dir = None;
         self.tile_atlas = None;
         self.world_map = None;
+        self.audio_session = None;
         self.suppress_auto_attach = true;
         self.status_msg = "Disconnected".to_string();
     }
@@ -224,6 +235,24 @@ impl UltimaCompanion {
         }
     }
 
+    /// Try to find DOSBox's audio session. Non-fatal — the audio controls
+    /// are simply disabled until we find the session.
+    fn try_acquire_audio(&mut self, pid: u32) {
+        if self.audio_session.is_some() {
+            return;
+        }
+        match AudioSession::find_for_pid(pid) {
+            Ok(Some(session)) => {
+                // Read initial state from the OS mixer.
+                self.audio_volume = session.get_volume().unwrap_or(1.0);
+                self.audio_muted = session.get_mute().unwrap_or(false);
+                self.audio_session = Some(session);
+            }
+            Ok(None) => {} // No session yet; DOSBox may not be producing audio.
+            Err(e) => eprintln!("Audio session lookup failed: {e}"),
+        }
+    }
+
     fn handle_process_death(&mut self) {
         self.patch_state = None; // Don't try to unpatch a dead process.
         self.attached = None;
@@ -233,6 +262,7 @@ impl UltimaCompanion {
         self.game_dir = None;
         self.tile_atlas = None;
         self.world_map = None;
+        self.audio_session = None;
         self.status_msg = "Process terminated".to_string();
     }
 
@@ -276,6 +306,7 @@ impl UltimaCompanion {
             return;
         }
 
+        let pid = attached.process.pid;
         let mem: &dyn MemoryAccess = &attached.process.memory;
 
         match read_party(mem, dos_base) {
@@ -300,6 +331,10 @@ impl UltimaCompanion {
                 self.status_msg = format!("Read map failed: {e}");
             }
         }
+
+        // Lazy audio session acquisition: DOSBox may not have an audio
+        // session until it starts producing sound.
+        self.try_acquire_audio(pid);
 
         self.last_refresh = Instant::now();
     }
@@ -397,6 +432,9 @@ impl eframe::App for UltimaCompanion {
             game_dir,
             patch_state,
             memory_watch,
+            audio_session,
+            audio_volume,
+            audio_muted,
             ..
         } = self;
 
@@ -452,6 +490,8 @@ impl eframe::App for UltimaCompanion {
                 gui::section_frame(&cols[2]).show(&mut cols[2], |ui| {
                     ui.set_min_size(ui.available_size());
                     game_written |= gui::actions_panel::show(ui, party, inventory, mem);
+                    ui.add_space(8.0);
+                    gui::audio_panel::show(ui, audio_session, audio_volume, audio_muted);
                 });
             });
         });

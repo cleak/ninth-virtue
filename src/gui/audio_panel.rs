@@ -1,0 +1,57 @@
+use crate::audio::AudioSession;
+
+const HEADING_COLOR: egui::Color32 = egui::Color32::from_rgb(100, 220, 180);
+const AUDIO_FILL: egui::Color32 = egui::Color32::from_rgb(55, 55, 100);
+const BTN_TEXT: egui::Color32 = egui::Color32::from_rgb(230, 230, 230);
+
+/// Render volume/mute controls. Reads and writes the audio session directly
+/// (no game memory involved).
+pub fn show(ui: &mut egui::Ui, session: &Option<AudioSession>, volume: &mut f32, muted: &mut bool) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.label(egui::RichText::new("🔊").heading());
+        ui.label(egui::RichText::new("Music").heading().color(HEADING_COLOR));
+    });
+
+    let enabled = session.is_some();
+
+    // Mute toggle button.
+    let mute_label = if *muted { "🔇 Unmute" } else { "🔈 Mute" };
+    let button_size = egui::vec2(ui.available_width(), 24.0);
+
+    if ui
+        .add_enabled(
+            enabled,
+            egui::Button::new(egui::RichText::new(mute_label).color(BTN_TEXT))
+                .fill(AUDIO_FILL)
+                .min_size(button_size),
+        )
+        .clicked()
+    {
+        let new_muted = !*muted;
+        if let Some(sess) = session.as_ref() {
+            match sess.set_mute(new_muted) {
+                Ok(()) => *muted = new_muted,
+                Err(e) => eprintln!("set_mute failed: {e}"),
+            }
+        }
+    }
+
+    // Volume slider.
+    ui.add_space(2.0);
+    ui.add_enabled_ui(enabled, |ui| {
+        let mut pct = *volume * 100.0;
+        let slider = egui::Slider::new(&mut pct, 0.0..=100.0)
+            .text("%")
+            .fixed_decimals(0);
+        if ui.add(slider).changed() {
+            let new_vol = pct / 100.0;
+            if let Some(sess) = session.as_ref() {
+                match sess.set_volume(new_vol) {
+                    Ok(()) => *volume = new_vol,
+                    Err(e) => eprintln!("set_volume failed: {e}"),
+                }
+            }
+        }
+    });
+}
