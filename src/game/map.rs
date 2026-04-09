@@ -19,7 +19,7 @@ pub enum LocationType {
 }
 
 impl LocationType {
-    fn from_id(id: u8) -> Self {
+    pub fn from_id(id: u8) -> Self {
         match id {
             0 => Self::Overworld,
             1..=8 => Self::Town(id),

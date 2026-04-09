@@ -1,71 +1,44 @@
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::audio::AudioSession;
-use crate::dosbox::config;
-use crate::game::character::{Character, read_party};
-use crate::game::injection::{self, PatchState};
-use crate::game::inventory::{Inventory, read_inventory};
-use crate::game::map;
-use crate::game::quest::{ShrineQuest, read_shrine_quest};
-use crate::game::vehicle::{self, Frigate};
-use crate::game::world_map::WorldMap;
+use crate::controller::{GameController, TickResult};
+use crate::game::character::Character;
+use crate::game::inventory::Inventory;
+use crate::game::quest::ShrineQuest;
+use crate::game::save_state;
+use crate::game::vehicle::Frigate;
 use crate::gui;
 use crate::gui::memory_watch_panel::MemoryWatch;
 use crate::gui::minimap_panel::MinimapState;
-use crate::memory::access::MemoryAccess;
-use crate::memory::process::{self, DosBoxProcess};
-use crate::memory::scanner;
-use crate::tiles::atlas::TileAtlas;
-
-pub struct AttachedProcess {
-    pub process: DosBoxProcess,
-    pub dos_base: Option<usize>,
-    pub game_confirmed: bool,
-}
+use crate::memory::process;
 
 /// How often to scan for DOSBox processes when not attached.
 const PROCESS_SCAN_INTERVAL: Duration = Duration::from_secs(2);
 
-/// How often to rescan memory when attached but game not yet confirmed.
-const RESCAN_INTERVAL: Duration = Duration::from_secs(2);
-
 pub struct UltimaCompanion {
-    // Connection state
+    ctrl: GameController,
+
     process_list: Vec<(u32, String)>,
     selected_pid: Option<u32>,
-    attached: Option<AttachedProcess>,
+    last_process_scan: Instant,
+    suppress_auto_attach: bool,
 
-    // Game state (cached)
     party: Vec<Character>,
     inventory: Inventory,
     shrine_quest: ShrineQuest,
     frigates: Vec<Frigate>,
     minimap: MinimapState,
-    game_dir: Option<PathBuf>,
-    tile_atlas: Option<TileAtlas>,
-    world_map: Option<WorldMap>,
 
-    // Timing
-    last_process_scan: Instant,
-    last_rescan: Instant,
-
-    // After manual disconnect, suppress auto-attach until DOSBox exits.
-    suppress_auto_attach: bool,
-
-    // UI state
     auto_refresh: bool,
     refresh_interval_secs: f32,
     last_refresh: Instant,
     status_msg: String,
 
-    // Code injection for stats redraw
-    patch_state: Option<PatchState>,
+    selected_save_slot: usize,
+    save_slots: Vec<Option<save_state::SlotInfo>>,
 
-    // Debug: memory watch
     memory_watch: MemoryWatch,
 
-    // Audio volume control (WASAPI)
     audio_session: Option<AudioSession>,
     audio_volume: f32,
     audio_muted: bool,
@@ -74,31 +47,27 @@ pub struct UltimaCompanion {
 impl UltimaCompanion {
     pub fn new() -> Self {
         let mut app = Self {
+            ctrl: GameController::new(),
             process_list: Vec::new(),
             selected_pid: None,
-            attached: None,
+            last_process_scan: Instant::now(),
+            suppress_auto_attach: false,
             party: Vec::new(),
             inventory: Inventory::default(),
             shrine_quest: ShrineQuest::default(),
             frigates: Vec::new(),
             minimap: MinimapState::new(),
-            game_dir: None,
-            tile_atlas: None,
-            world_map: None,
-            last_process_scan: Instant::now(),
-            last_rescan: Instant::now(),
-            suppress_auto_attach: false,
             auto_refresh: true,
             refresh_interval_secs: 0.025,
             last_refresh: Instant::now(),
             status_msg: "Searching for DOSBox...".to_string(),
-            patch_state: None,
+            selected_save_slot: 0,
+            save_slots: vec![None; save_state::NUM_SLOTS],
             memory_watch: MemoryWatch::default(),
             audio_session: None,
             audio_volume: 1.0,
             audio_muted: false,
         };
-        // Scan immediately on startup so we connect without delay.
         app.scan_processes();
         if app.process_list.len() == 1 {
             let pid = app.process_list[0].0;
@@ -112,11 +81,10 @@ impl UltimaCompanion {
             Ok(list) => {
                 if list.is_empty() {
                     self.suppress_auto_attach = false;
-                    if self.attached.is_none() {
+                    if self.ctrl.is_disconnected() {
                         self.status_msg = "Searching for DOSBox...".to_string();
                     }
                 }
-                // Reset selection if the current PID disappeared.
                 if !list.iter().any(|(p, _)| Some(*p) == self.selected_pid) {
                     self.selected_pid = list.first().map(|(pid, _)| *pid);
                 }
@@ -130,65 +98,22 @@ impl UltimaCompanion {
     }
 
     fn attach(&mut self, pid: u32) {
-        match process::attach(pid) {
-            Ok(proc) => {
-                let (dos_base, game_confirmed) = match scanner::find_dos_base(&proc.memory) {
-                    Ok(result) => (Some(result.dos_base), result.game_confirmed),
-                    Err(e) => {
-                        self.status_msg = format!("Attached, scan failed: {e}");
-                        (None, false)
-                    }
-                };
-
-                if dos_base.is_some() {
-                    if game_confirmed {
-                        self.status_msg = format!("Connected to {} (PID {})", proc.name, proc.pid,);
+        match self.ctrl.attach(pid) {
+            Ok(()) => {
+                self.selected_pid = Some(pid);
+                if let Some(name) = self.ctrl.process_name() {
+                    if self.ctrl.game_confirmed() {
+                        self.status_msg = format!("Connected to {name} (PID {pid})");
                     } else {
                         self.status_msg = "Waiting for game to load...".to_string();
                     }
                 }
-
-                // Try to locate game data files and load tile atlas + world map
-                match config::find_game_directory(proc.memory.handle()) {
-                    Ok(dir) => {
-                        match TileAtlas::load(&dir) {
-                            Ok(atlas) => {
-                                self.tile_atlas = Some(atlas);
-                                // Only load the world map if the atlas succeeded
-                                match WorldMap::load(&dir) {
-                                    Ok(wm) => self.world_map = Some(wm),
-                                    Err(e) => {
-                                        self.status_msg = format!(
-                                            "World map failed: {e} (dir: {})",
-                                            dir.display()
-                                        );
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                self.status_msg =
-                                    format!("Tiles failed: {e} (dir: {})", dir.display());
-                            }
-                        }
-                        self.game_dir = Some(dir);
-                    }
-                    Err(e) => {
-                        self.status_msg = format!("Game dir not found: {e}");
-                    }
+                if let Some(dir) = self.ctrl.game_dir.as_ref() {
+                    self.save_slots = save_state::list_slots(dir);
                 }
-
-                self.selected_pid = Some(pid);
                 self.try_acquire_audio(pid);
-                self.attached = Some(AttachedProcess {
-                    process: proc,
-                    dos_base,
-                    game_confirmed,
-                });
-                self.last_rescan = Instant::now();
-
-                if game_confirmed {
+                if self.ctrl.game_confirmed() {
                     self.refresh_game_state();
-                    self.try_apply_patch();
                 }
             }
             Err(e) => {
@@ -198,152 +123,42 @@ impl UltimaCompanion {
     }
 
     fn detach(&mut self) {
-        // Remove the code patch before dropping the process handle.
-        if let (Some(attached), Some(state)) = (&self.attached, &self.patch_state) {
-            injection::remove_patch(&attached.process.memory, state);
-        }
-        self.patch_state = None;
-        self.attached = None;
-        self.party.clear();
-        self.inventory = Inventory::default();
-        self.shrine_quest = ShrineQuest::default();
-        self.frigates.clear();
-        self.minimap.map = None;
-        self.game_dir = None;
-        self.tile_atlas = None;
-        self.world_map = None;
-        self.audio_session = None;
+        self.ctrl.request_detach();
         self.suppress_auto_attach = true;
-        self.status_msg = "Disconnected".to_string();
     }
 
-    /// Try to apply the code-cave patch for stats redraw.  Non-fatal on
-    /// failure — the app continues to work, just without on-demand redraw.
-    fn try_apply_patch(&mut self) {
-        // Don't re-apply if already patched.
-        if self.patch_state.is_some() {
-            return;
-        }
-
-        let Some(ref attached) = self.attached else {
-            return;
-        };
-        let Some(dos_base) = attached.dos_base else {
-            return;
-        };
-
-        match injection::apply_patch(&attached.process.memory, dos_base) {
-            Ok(state) => {
-                self.patch_state = Some(state);
-                eprintln!("Redraw patch applied successfully");
-            }
-            Err(e) => {
-                eprintln!("Redraw patch failed (non-fatal): {e}");
-            }
-        }
-    }
-
-    /// Try to find DOSBox's audio session. Non-fatal — the audio controls
-    /// are simply disabled until we find the session.
-    fn try_acquire_audio(&mut self, pid: u32) {
-        if self.audio_session.is_some() {
-            return;
-        }
-        match AudioSession::find_for_pid(pid) {
-            Ok(Some(session)) => {
-                // Read initial state from the OS mixer.
-                self.audio_volume = session.get_volume().unwrap_or(1.0);
-                self.audio_muted = session.get_mute().unwrap_or(false);
-                self.audio_session = Some(session);
-            }
-            Ok(None) => {} // No session yet; DOSBox may not be producing audio.
-            Err(e) => eprintln!("Audio session lookup failed: {e}"),
-        }
-    }
-
-    fn handle_process_death(&mut self) {
-        self.patch_state = None; // Don't try to unpatch a dead process.
-        self.attached = None;
+    fn reset_cached_state(&mut self) {
         self.party.clear();
         self.inventory = Inventory::default();
         self.shrine_quest = ShrineQuest::default();
         self.frigates.clear();
         self.minimap.map = None;
-        self.game_dir = None;
-        self.tile_atlas = None;
-        self.world_map = None;
-        self.audio_session = None;
-        self.status_msg = "Process terminated".to_string();
-    }
-
-    fn rescan_memory(&mut self) {
-        let Some(ref mut attached) = self.attached else {
-            return;
-        };
-        match scanner::find_dos_base(&attached.process.memory) {
-            Ok(result) => {
-                attached.dos_base = Some(result.dos_base);
-                let was_confirmed = attached.game_confirmed;
-                attached.game_confirmed = result.game_confirmed;
-                if result.game_confirmed {
-                    self.status_msg = format!(
-                        "Connected to {} (PID {})",
-                        attached.process.name, attached.process.pid,
-                    );
-                    if !was_confirmed {
-                        // Game just became confirmed — apply patch.
-                        // (refresh_game_state is called by the caller)
-                    }
-                }
-            }
-            Err(e) => {
-                self.status_msg = format!("Rescan failed: {e}");
-            }
-        }
-        self.last_rescan = Instant::now();
+        self.save_slots = vec![None; save_state::NUM_SLOTS];
     }
 
     fn refresh_game_state(&mut self) {
-        let Some(ref attached) = self.attached else {
-            return;
-        };
-        let Some(dos_base) = attached.dos_base else {
-            return;
-        };
-
-        if !attached.process.is_alive() {
-            self.handle_process_death();
-            return;
-        }
-
-        let pid = attached.process.pid;
-        let mem: &dyn MemoryAccess = &attached.process.memory;
-
-        match read_party(mem, dos_base) {
+        match self.ctrl.read_party() {
             Ok(p) => self.party = p,
             Err(e) => {
                 self.status_msg = format!("Read party failed: {e}");
                 return;
             }
         }
-
-        match read_inventory(mem, dos_base) {
+        match self.ctrl.read_inventory() {
             Ok(inv) => self.inventory = inv,
             Err(e) => {
                 self.status_msg = format!("Read inventory failed: {e}");
                 return;
             }
         }
-
-        match read_shrine_quest(mem, dos_base) {
+        match self.ctrl.read_shrine_quest() {
             Ok(sq) => self.shrine_quest = sq,
             Err(e) => {
                 self.status_msg = format!("Read shrine quest failed: {e}");
                 return;
             }
         }
-
-        match vehicle::read_frigates(mem, dos_base) {
+        match self.ctrl.read_frigates() {
             Ok(f) => self.frigates = f,
             Err(e) => {
                 self.frigates.clear();
@@ -351,75 +166,98 @@ impl UltimaCompanion {
                 return;
             }
         }
-
-        match map::read_map_state(mem, dos_base) {
+        match self.ctrl.read_map_state() {
             Ok(ms) => self.minimap.map = Some(ms),
             Err(e) => {
                 self.status_msg = format!("Read map failed: {e}");
             }
         }
 
-        // Lazy audio session acquisition: DOSBox may not have an audio
-        // session until it starts producing sound.
-        self.try_acquire_audio(pid);
+        if let Some(pid) = self.ctrl.process_pid() {
+            self.try_acquire_audio(pid);
+        }
 
         self.last_refresh = Instant::now();
+    }
+
+    fn try_acquire_audio(&mut self, pid: u32) {
+        if self.audio_session.is_some() {
+            return;
+        }
+        if let Ok(Some(session)) = AudioSession::find_for_pid(pid) {
+            self.audio_volume = session.get_volume().unwrap_or(1.0);
+            self.audio_muted = session.get_mute().unwrap_or(false);
+            self.audio_session = Some(session);
+        }
     }
 }
 
 impl eframe::App for UltimaCompanion {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // --- Auto-management ---
-        if self.attached.is_none() {
-            // Periodically scan for DOSBox processes.
+        // --- FSM tick ---
+        let tick = self.ctrl.tick();
+        match tick {
+            TickResult::NeedsRepaint => ctx.request_repaint(),
+            TickResult::SaveComplete(slot, info) => {
+                self.status_msg = format!("Saved slot {}", slot + 1);
+                self.save_slots[slot] = Some(info);
+            }
+            TickResult::LoadComplete(slot) => {
+                self.status_msg = format!("Loaded slot {}", slot + 1);
+                self.refresh_game_state();
+            }
+            TickResult::Detached => {
+                self.reset_cached_state();
+                self.status_msg = "Disconnected".to_string();
+            }
+            TickResult::PatchApplied => {
+                if self.ctrl.game_confirmed() {
+                    self.refresh_game_state();
+                    if let (Some(name), Some(pid)) =
+                        (self.ctrl.process_name(), self.ctrl.process_pid())
+                    {
+                        self.status_msg = format!("Connected to {name} (PID {pid})");
+                    }
+                }
+            }
+            TickResult::Error(e) => {
+                self.status_msg = e;
+                if self.ctrl.is_disconnected() {
+                    self.reset_cached_state();
+                }
+            }
+            TickResult::Idle => {}
+        }
+
+        // --- Process scanning ---
+        if self.ctrl.is_disconnected() {
             if self.last_process_scan.elapsed() >= PROCESS_SCAN_INTERVAL {
                 self.scan_processes();
-                // Auto-attach if exactly one process and not suppressed.
                 if !self.suppress_auto_attach && self.process_list.len() == 1 {
                     let pid = self.process_list[0].0;
                     self.attach(pid);
                 }
             }
             ctx.request_repaint_after(PROCESS_SCAN_INTERVAL);
-        } else if !self.attached.as_ref().unwrap().process.is_alive() {
-            // Process died -- clean up.
-            self.handle_process_death();
-        } else {
-            let game_confirmed = self.attached.as_ref().unwrap().game_confirmed;
-
-            if !game_confirmed {
-                // Attached but game not loaded: periodically rescan memory.
-                if self.last_rescan.elapsed() >= RESCAN_INTERVAL {
-                    self.rescan_memory();
-                    if self.attached.as_ref().is_some_and(|a| a.game_confirmed) {
-                        self.refresh_game_state();
-                        self.try_apply_patch();
-                    }
-                }
-                ctx.request_repaint_after(RESCAN_INTERVAL);
-            } else if self.auto_refresh {
-                let interval = Duration::from_secs_f32(self.refresh_interval_secs);
-                if self.last_refresh.elapsed() >= interval {
-                    self.refresh_game_state();
-                }
-                ctx.request_repaint_after(interval);
+        } else if self.ctrl.is_ready() && self.auto_refresh {
+            let interval = Duration::from_secs_f32(self.refresh_interval_secs);
+            if self.last_refresh.elapsed() >= interval {
+                self.refresh_game_state();
             }
+            ctx.request_repaint_after(interval);
         }
 
         // --- Connection bar ---
         let mut conn_action = gui::connection_bar::ConnectionAction::None;
-        let is_attached = self.attached.is_some();
-        let game_confirmed = self.attached.as_ref().is_some_and(|a| a.game_confirmed);
-        let dos_base = self.attached.as_ref().and_then(|a| a.dos_base);
 
         egui::TopBottomPanel::top("connection").show(ctx, |ui| {
             conn_action = gui::connection_bar::show(
                 ui,
                 &self.process_list,
                 &mut self.selected_pid,
-                is_attached,
-                game_confirmed,
-                dos_base,
+                self.ctrl.is_attached(),
+                self.ctrl.game_confirmed(),
+                self.ctrl.dos_base(),
                 &mut self.auto_refresh,
                 &mut self.refresh_interval_secs,
                 &mut self.memory_watch.visible,
@@ -436,30 +274,28 @@ impl eframe::App for UltimaCompanion {
             gui::connection_bar::ConnectionAction::None => {}
         }
 
-        // --- Memory watch polling (every frame while recording) ---
+        let phase_label = self.ctrl.phase_label();
+        if !phase_label.is_empty() && self.status_msg != phase_label {
+            self.status_msg = phase_label.to_string();
+        }
+
+        // --- Memory watch polling ---
         if self.memory_watch.recording {
-            if let Some(ref attached) = self.attached
-                && let Some(dos_base) = attached.dos_base
-            {
-                self.memory_watch.poll(&attached.process.memory, dos_base);
-            }
-            // Keep repainting at max rate while recording.
+            self.ctrl.poll_memory_watch(&mut self.memory_watch);
             ctx.request_repaint();
         }
 
         // --- Main content ---
-        // Destructure for disjoint borrow splitting
         let UltimaCompanion {
-            attached,
+            ctrl,
             party,
             inventory,
             shrine_quest,
             frigates,
             minimap,
-            tile_atlas,
-            world_map,
-            game_dir,
-            patch_state,
+            selected_save_slot,
+            save_slots,
+            status_msg,
             memory_watch,
             audio_session,
             audio_volume,
@@ -467,43 +303,34 @@ impl eframe::App for UltimaCompanion {
             ..
         } = self;
 
-        let mem: Option<(&dyn MemoryAccess, usize)> = attached.as_ref().and_then(|a| {
-            a.dos_base
-                .map(|base| (&a.process.memory as &dyn MemoryAccess, base))
-        });
+        gui::memory_watch_panel::show_with_ctrl(ctx, memory_watch, ctrl);
 
-        // --- Memory watch window ---
-        gui::memory_watch_panel::show(ctx, memory_watch, mem);
-
-        // --- Mini-map (anchored bottom panel) ---
         egui::TopBottomPanel::bottom("minimap")
             .min_height(300.0)
             .resizable(true)
             .show(ctx, |ui| {
                 gui::section_frame(ui).show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
-                    if let Some(atlas) = tile_atlas.as_ref() {
-                        gui::minimap_panel::show(ui, minimap, atlas, world_map.as_ref());
-                    } else if attached.is_some() {
-                        // Only show load errors when actually attached to a process
-                        let status = match game_dir {
+                    if let Some(atlas) = ctrl.tile_atlas.as_ref() {
+                        gui::minimap_panel::show(ui, minimap, atlas, ctrl.world_map.as_ref());
+                    } else if ctrl.is_attached() {
+                        let status = match &ctrl.game_dir {
                             Some(dir) => format!("Tiles not found in {}", dir.display()),
-                            None => "Game directory not found — could not locate DOSBox config"
-                                .to_string(),
+                            None => "Game directory not found".to_string(),
                         };
                         gui::minimap_panel::show_no_atlas(ui, &status);
                     }
                 });
             });
 
-        // --- Party, inventory, actions ---
         let mut game_written = false;
+        let mut save_action = gui::actions_panel::SaveAction::None;
 
         egui::CentralPanel::default().show(ctx, |ui| {
             gui::section_frame(ui).show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 game_written |=
-                    gui::party_panel::show(ui, party, frigates, minimap.map.as_ref(), mem);
+                    gui::party_panel::show(ui, party, frigates, minimap.map.as_ref(), ctrl);
             });
 
             ui.add_space(4.0);
@@ -511,15 +338,26 @@ impl eframe::App for UltimaCompanion {
             ui.columns(4, |cols| {
                 gui::section_frame(&cols[0]).show(&mut cols[0], |ui| {
                     ui.set_min_size(ui.available_size());
-                    game_written |= gui::inventory_panel::show_resources(ui, inventory, mem);
+                    game_written |= gui::inventory_panel::show_resources(ui, inventory, ctrl);
                 });
                 gui::section_frame(&cols[1]).show(&mut cols[1], |ui| {
                     ui.set_min_size(ui.available_size());
-                    game_written |= gui::inventory_panel::show_reagents(ui, inventory, mem);
+                    game_written |= gui::inventory_panel::show_reagents(ui, inventory, ctrl);
                 });
                 gui::section_frame(&cols[2]).show(&mut cols[2], |ui| {
                     ui.set_min_size(ui.available_size());
-                    game_written |= gui::actions_panel::show(ui, party, inventory, frigates, mem);
+                    let (w, action) = gui::actions_panel::show(
+                        ui,
+                        party,
+                        inventory,
+                        frigates,
+                        ctrl,
+                        selected_save_slot,
+                        save_slots,
+                        status_msg,
+                    );
+                    game_written |= w;
+                    save_action = action;
                     ui.add_space(8.0);
                     gui::audio_panel::show(ui, audio_session, audio_volume, audio_muted);
                 });
@@ -530,10 +368,23 @@ impl eframe::App for UltimaCompanion {
             });
         });
 
-        // After all panels have run, trigger a single redraw if any
-        // panel wrote to game memory.
-        if game_written && let (Some((mem, _)), Some(patch)) = (mem, patch_state.as_ref()) {
-            let _ = injection::trigger_redraw(mem, patch);
+        if game_written {
+            let _ = self.ctrl.trigger_redraw();
+            self.refresh_game_state();
+        }
+
+        match save_action {
+            gui::actions_panel::SaveAction::Save(slot) => {
+                if let Err(e) = self.ctrl.request_save(slot) {
+                    self.status_msg = format!("Save failed: {e}");
+                }
+            }
+            gui::actions_panel::SaveAction::Load(slot) => {
+                if let Err(e) = self.ctrl.request_load(slot) {
+                    self.status_msg = format!("Load failed: {e}");
+                }
+            }
+            gui::actions_panel::SaveAction::None => {}
         }
     }
 }

@@ -1,10 +1,10 @@
 use egui_extras::{Column, TableBuilder};
 
+use crate::controller::GameController;
 use crate::game::character::{Character, Status};
 use crate::game::map::MapState;
 use crate::game::offsets::FRIGATE_MAX_HULL;
-use crate::game::vehicle::{Frigate, is_frigate_tile, write_frigate_hull, write_frigate_skiffs};
-use crate::memory::access::MemoryAccess;
+use crate::game::vehicle::{Frigate, is_frigate_tile};
 
 /// Find the frigate the party is currently aboard, if any.
 fn current_ship<'a>(
@@ -24,7 +24,7 @@ pub fn show(
     party: &mut [Character],
     frigates: &mut [Frigate],
     map: Option<&MapState>,
-    mem: Option<(&dyn MemoryAccess, usize)>,
+    ctrl: &GameController,
 ) -> bool {
     let mut wrote = false;
     if party.is_empty() {
@@ -43,17 +43,17 @@ pub fn show(
     });
 
     TableBuilder::new(ui)
-        .column(Column::auto().at_least(70.0)) // Name
-        .column(Column::exact(55.0)) // Class
-        .column(Column::auto().at_least(85.0)) // Status
-        .column(Column::exact(40.0)) // STR
-        .column(Column::exact(40.0)) // DEX
-        .column(Column::exact(40.0)) // INT
-        .column(Column::exact(40.0)) // MP
-        .column(Column::exact(45.0)) // HP
-        .column(Column::exact(50.0)) // MaxHP
-        .column(Column::exact(50.0)) // XP
-        .column(Column::exact(35.0)) // Lvl
+        .column(Column::auto().at_least(70.0))
+        .column(Column::exact(55.0))
+        .column(Column::auto().at_least(85.0))
+        .column(Column::exact(40.0))
+        .column(Column::exact(40.0))
+        .column(Column::exact(40.0))
+        .column(Column::exact(40.0))
+        .column(Column::exact(45.0))
+        .column(Column::exact(50.0))
+        .column(Column::exact(50.0))
+        .column(Column::exact(35.0))
         .striped(true)
         .header(20.0, |mut header| {
             let hdr = egui::Color32::from_rgb(140, 180, 255);
@@ -131,7 +131,6 @@ pub fn show(
                         changed = true;
                     }
                 });
-
                 row.col(|ui| {
                     if ui
                         .add(egui::DragValue::new(&mut ch.dex).range(1..=99))
@@ -140,7 +139,6 @@ pub fn show(
                         changed = true;
                     }
                 });
-
                 row.col(|ui| {
                     if ui
                         .add(egui::DragValue::new(&mut ch.int).range(1..=99))
@@ -149,7 +147,6 @@ pub fn show(
                         changed = true;
                     }
                 });
-
                 row.col(|ui| {
                     if ui
                         .add(egui::DragValue::new(&mut ch.mp).range(0..=99))
@@ -158,7 +155,6 @@ pub fn show(
                         changed = true;
                     }
                 });
-
                 row.col(|ui| {
                     if ui
                         .add(egui::DragValue::new(&mut ch.hp).range(0..=999))
@@ -167,7 +163,6 @@ pub fn show(
                         changed = true;
                     }
                 });
-
                 row.col(|ui| {
                     if ui
                         .add(egui::DragValue::new(&mut ch.max_hp).range(1..=999))
@@ -176,7 +171,6 @@ pub fn show(
                         changed = true;
                     }
                 });
-
                 row.col(|ui| {
                     if ui
                         .add(egui::DragValue::new(&mut ch.xp).range(0..=9999))
@@ -185,7 +179,6 @@ pub fn show(
                         changed = true;
                     }
                 });
-
                 row.col(|ui| {
                     if ui
                         .add(egui::DragValue::new(&mut ch.level).range(1..=8))
@@ -197,10 +190,8 @@ pub fn show(
 
                 if changed {
                     party[i] = ch;
-                    if let Some((mem, dos_base)) = mem {
-                        let _ = crate::game::character::write_character(mem, dos_base, &party[i]);
-                        wrote = true;
-                    }
+                    let _ = ctrl.write_character(&party[i]);
+                    wrote = true;
                 }
             });
         });
@@ -215,9 +206,8 @@ pub fn show(
             if ui
                 .add(egui::DragValue::new(&mut ship.hull).range(0..=FRIGATE_MAX_HULL))
                 .changed()
-                && let Some((mem, dos_base)) = mem
             {
-                let _ = write_frigate_hull(mem, dos_base, ship);
+                let _ = ctrl.write_frigate_hull(ship);
                 wrote = true;
             }
             ui.label(format!("/ {FRIGATE_MAX_HULL}"));
@@ -228,9 +218,8 @@ pub fn show(
                 if ui
                     .add(egui::DragValue::new(&mut ship.skiffs).range(0..=u8::MAX))
                     .changed()
-                    && let Some((mem, dos_base)) = mem
                 {
-                    let _ = write_frigate_skiffs(mem, dos_base, ship);
+                    let _ = ctrl.write_frigate_skiffs(ship);
                     wrote = true;
                 }
             }

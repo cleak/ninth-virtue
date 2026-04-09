@@ -1,5 +1,5 @@
-use crate::game::inventory::{Inventory, REAGENT_NAMES, write_inventory};
-use crate::memory::access::MemoryAccess;
+use crate::controller::GameController;
+use crate::game::inventory::{Inventory, REAGENT_NAMES};
 
 const RESOURCE_HEADING: egui::Color32 = egui::Color32::from_rgb(255, 200, 80);
 const REAGENT_HEADING: egui::Color32 = egui::Color32::from_rgb(180, 140, 255);
@@ -13,11 +13,7 @@ fn colored_heading(ui: &mut egui::Ui, emoji: &str, text: &str, color: egui::Colo
 }
 
 /// Returns `true` if inventory was written to game memory.
-pub fn show_resources(
-    ui: &mut egui::Ui,
-    inventory: &mut Inventory,
-    mem: Option<(&dyn MemoryAccess, usize)>,
-) -> bool {
+pub fn show_resources(ui: &mut egui::Ui, inventory: &mut Inventory, ctrl: &GameController) -> bool {
     let mut changed = false;
 
     colored_heading(ui, "🎒", "Resources", RESOURCE_HEADING);
@@ -33,7 +29,6 @@ pub fn show_resources(
                 changed = true;
             }
             ui.end_row();
-
             ui.label("💰 Gold:");
             if ui
                 .add(egui::DragValue::new(&mut inventory.gold).range(0..=9999))
@@ -42,7 +37,6 @@ pub fn show_resources(
                 changed = true;
             }
             ui.end_row();
-
             ui.label("🔑 Keys:");
             if ui
                 .add(egui::DragValue::new(&mut inventory.keys).range(0..=99))
@@ -51,7 +45,6 @@ pub fn show_resources(
                 changed = true;
             }
             ui.end_row();
-
             ui.label("💎 Gems:");
             if ui
                 .add(egui::DragValue::new(&mut inventory.gems).range(0..=99))
@@ -60,7 +53,6 @@ pub fn show_resources(
                 changed = true;
             }
             ui.end_row();
-
             ui.label("🔥 Torches:");
             if ui
                 .add(egui::DragValue::new(&mut inventory.torches).range(0..=99))
@@ -69,7 +61,6 @@ pub fn show_resources(
                 changed = true;
             }
             ui.end_row();
-
             ui.label("🏹 Arrows:");
             if ui
                 .add(egui::DragValue::new(&mut inventory.arrows).range(0..=99))
@@ -78,7 +69,6 @@ pub fn show_resources(
                 changed = true;
             }
             ui.end_row();
-
             ui.label("☯ Karma:");
             if ui
                 .add(egui::DragValue::new(&mut inventory.karma).range(0..=99))
@@ -89,19 +79,15 @@ pub fn show_resources(
             ui.end_row();
         });
 
-    if changed && let Some((mem, dos_base)) = mem {
-        let _ = write_inventory(mem, dos_base, inventory);
+    if changed {
+        let _ = ctrl.write_inventory(inventory);
         return true;
     }
     false
 }
 
 /// Returns `true` if inventory was written to game memory.
-pub fn show_reagents(
-    ui: &mut egui::Ui,
-    inventory: &mut Inventory,
-    mem: Option<(&dyn MemoryAccess, usize)>,
-) -> bool {
+pub fn show_reagents(ui: &mut egui::Ui, inventory: &mut Inventory, ctrl: &GameController) -> bool {
     let mut changed = false;
 
     colored_heading(ui, "🧪", "Reagents", REAGENT_HEADING);
@@ -121,8 +107,8 @@ pub fn show_reagents(
             }
         });
 
-    if changed && let Some((mem, dos_base)) = mem {
-        let _ = write_inventory(mem, dos_base, inventory);
+    if changed {
+        let _ = ctrl.write_inventory(inventory);
         return true;
     }
     false

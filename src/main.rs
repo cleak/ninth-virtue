@@ -1,5 +1,6 @@
 mod app;
 mod audio;
+mod controller;
 mod dosbox;
 mod game;
 mod gui;

@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod controller;
 pub mod dosbox;
 pub mod game;
 pub mod gui;

@@ -86,6 +86,15 @@ const HEADING_COLOR: egui::Color32 = egui::Color32::from_rgb(180, 140, 220);
 const KNOWN_COLOR: egui::Color32 = egui::Color32::from_rgb(120, 180, 255);
 const UNKNOWN_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 200, 80);
 
+/// Wrapper that accepts a `GameController` instead of raw `MemoryAccess`.
+pub fn show_with_ctrl(
+    ctx: &egui::Context,
+    watch: &mut MemoryWatch,
+    ctrl: &crate::controller::GameController,
+) {
+    show(ctx, watch, ctrl.mem_access());
+}
+
 pub fn show(ctx: &egui::Context, watch: &mut MemoryWatch, mem: Option<(&dyn MemoryAccess, usize)>) {
     if !watch.visible {
         return;
