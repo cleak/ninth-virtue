@@ -87,9 +87,9 @@ const DS_SAVE_DELTA: u16 = 0x55A6;
 
 /// Size of the injected code cave in bytes.
 /// Combined cave with two entry points (get_command + putchar), shared
-/// trap logic, source-based exit routing, and two displaced-instruction
-/// exit paths.
-const CAVE_SIZE: usize = 90;
+/// trap logic, OPL reset after load, source-based exit routing, and
+/// two displaced-instruction exit paths.
+const CAVE_SIZE: usize = 110;
 
 /// Byte offset of Entry B (putchar) within the cave.
 const CAVE_ENTRY_B_OFFSET: usize = 29;
@@ -310,23 +310,12 @@ fn encode_cave(
     bp_ds: u16,
     source_ds: u16,
 ) -> [u8; CAVE_SIZE] {
-    let flag_lo = (flag_ds & 0xFF) as u8;
-    let flag_hi = (flag_ds >> 8) as u8;
-    let trap_lo = (trap_ds & 0xFF) as u8;
-    let trap_hi = (trap_ds >> 8) as u8;
-    let sp_lo = (sp_ds & 0xFF) as u8;
-    let sp_hi = (sp_ds >> 8) as u8;
-    let bp_lo = (bp_ds & 0xFF) as u8;
-    let bp_hi = (bp_ds >> 8) as u8;
-    let src_lo = (source_ds & 0xFF) as u8;
-    let src_hi = (source_ds >> 8) as u8;
+    let lo = |v: u16| (v & 0xFF) as u8;
+    let hi = |v: u16| (v >> 8) as u8;
 
-    // CALL redraw: from byte 15 (next PC after E8 xx xx)
     let call_disp = (REDRAW_OFFSET as i32 - (cave_cs_offset as i32 + 15)) as i16;
-    // JMP get_command resume: from byte 84 (next PC after E9 xx xx at 81)
-    let gc_resume_disp = (HOOK_RESUME as i32 - (cave_cs_offset as i32 + 84)) as i16;
-    // JMP putchar resume: from byte 90 (next PC after E9 xx xx at 87)
-    let pc_resume_disp = (PUTCHAR_RESUME as i32 - (cave_cs_offset as i32 + 90)) as i16;
+    let gc_resume_disp = (HOOK_RESUME as i32 - (cave_cs_offset as i32 + 104)) as i16;
+    let pc_resume_disp = (PUTCHAR_RESUME as i32 - (cave_cs_offset as i32 + 110)) as i16;
 
     let cd = call_disp.to_le_bytes();
     let gd = gc_resume_disp.to_le_bytes();
@@ -334,37 +323,125 @@ fn encode_cave(
 
     [
         // === Entry A: get_command (bytes 0-28) ===
-        // Redraw check (0-14)
-        0x80, 0x3E, flag_lo, flag_hi, 0x00, //  0: CMP byte [dirty_flag], 0
-        0x74, 0x08, //  5: JE +8 → 15
-        0xC6, 0x06, flag_lo, flag_hi, 0x00, //  7: MOV byte [dirty_flag], 0
-        0xE8, cd[0], cd[1], // 12: CALL redraw_full_stats
-        // Trap check (15-28)
-        0x80, 0x3E, trap_lo, trap_hi, 0x01, // 15: CMP byte [trap_flag], 1
-        0x75, 0x36, // 20: JNE +54 → 76 (get_cmd_exit)
-        0xC6, 0x06, src_lo, src_hi, 0x01, // 22: MOV byte [source], 1
-        0xEB, 0x0C, // 27: JMP +12 → 41 (common)
+        0x80,
+        0x3E,
+        lo(flag_ds),
+        hi(flag_ds),
+        0x00, //  0: CMP byte [dirty_flag], 0
+        0x74,
+        0x08, //  5: JE +8 → 15
+        0xC6,
+        0x06,
+        lo(flag_ds),
+        hi(flag_ds),
+        0x00, //  7: MOV byte [dirty_flag], 0
+        0xE8,
+        cd[0],
+        cd[1], // 12: CALL redraw_full_stats
+        0x80,
+        0x3E,
+        lo(trap_ds),
+        hi(trap_ds),
+        0x01, // 15: CMP byte [trap_flag], 1
+        0x75,
+        0x4A, // 20: JNE +74 → 96 (get_cmd_exit)
+        0xC6,
+        0x06,
+        lo(source_ds),
+        hi(source_ds),
+        0x01, // 22: MOV byte [source], 1
+        0xEB,
+        0x0C, // 27: JMP +12 → 41 (common)
         // === Entry B: putchar (bytes 29-40) ===
-        0x80, 0x3E, trap_lo, trap_hi, 0x01, // 29: CMP byte [trap_flag], 1
-        0x75, 0x30, // 34: JNE +48 → 84 (putchar_exit)
-        0xC6, 0x06, src_lo, src_hi, 0x02, // 36: MOV byte [source], 2
-        // === Common trap logic (bytes 41-75) ===
-        0x89, 0x26, sp_lo, sp_hi, // 41: MOV [saved_sp], SP
-        0x89, 0x2E, bp_lo, bp_hi, // 45: MOV [saved_bp], BP
-        0xC6, 0x06, trap_lo, trap_hi, 0x02, // 49: MOV byte [trap_flag], 2
-        0x80, 0x3E, trap_lo, trap_hi, 0x00, // 54: CMP byte [trap_flag], 0
-        0x75, 0xF9, // 59: JNE -7 → 54 (spin)
-        0x8B, 0x26, sp_lo, sp_hi, // 61: MOV SP, [saved_sp]
-        0x8B, 0x2E, bp_lo, bp_hi, // 65: MOV BP, [saved_bp]
-        0x80, 0x3E, src_lo, src_hi, 0x01, // 69: CMP byte [source], 1
-        0x75, 0x08, // 74: JNE +8 → 84 (putchar_exit)
-        // === get_command exit (bytes 76-83) ===
-        0x80, 0x3E, 0x93, 0x58, 0x21, // 76: CMP byte [0x5893], 0x21
-        0xE9, gd[0], gd[1], // 81: JMP get_command resume
-        // === putchar exit (bytes 84-89) ===
-        0x55, // 84: PUSH BP
-        0x8B, 0xEC, // 85: MOV BP, SP
-        0xE9, pd[0], pd[1], // 87: JMP putchar resume
+        0x80,
+        0x3E,
+        lo(trap_ds),
+        hi(trap_ds),
+        0x01, // 29: CMP byte [trap_flag], 1
+        0x75,
+        0x44, // 34: JNE +68 → 104 (putchar_exit)
+        0xC6,
+        0x06,
+        lo(source_ds),
+        hi(source_ds),
+        0x02, // 36: MOV byte [source], 2
+        // === Common trap logic (bytes 41-88) ===
+        0x89,
+        0x26,
+        lo(sp_ds),
+        hi(sp_ds), // 41: MOV [saved_sp], SP
+        0x89,
+        0x2E,
+        lo(bp_ds),
+        hi(bp_ds), // 45: MOV [saved_bp], BP
+        // OPL reset setup (before ack — CX/BL/DX are caller-saved)
+        0xB9,
+        0x09,
+        0x00, // 49: MOV CX, 9
+        0xB3,
+        0xB0, // 52: MOV BL, 0xB0
+        0xBA,
+        0x88,
+        0x03, // 54: MOV DX, 0x0388
+        // Ack + spin
+        0xC6,
+        0x06,
+        lo(trap_ds),
+        hi(trap_ds),
+        0x02, // 57: MOV byte [trap_flag], 2
+        0x80,
+        0x3E,
+        lo(trap_ds),
+        hi(trap_ds),
+        0x00, // 62: CMP byte [trap_flag], 0
+        0x75,
+        0xF9, // 67: JNE -7 → 62 (spin)
+        // Restore SP/BP
+        0x8B,
+        0x26,
+        lo(sp_ds),
+        hi(sp_ds), // 69: MOV SP, [saved_sp]
+        0x8B,
+        0x2E,
+        lo(bp_ds),
+        hi(bp_ds), // 73: MOV BP, [saved_bp]
+        // OPL reset loop (silences all 9 OPL2 channels)
+        0x8A,
+        0xC3, // 77: MOV AL, BL
+        0xEE, // 79: OUT DX, AL
+        0x42, // 80: INC DX  (→ 0x389)
+        0x32,
+        0xC0, // 81: XOR AL, AL
+        0xEE, // 83: OUT DX, AL
+        0x4A, // 84: DEC DX  (→ 0x388)
+        0xFE,
+        0xC3, // 85: INC BL
+        0xE2,
+        0xF4, // 87: LOOP -12 → 77
+        // === Source routing (bytes 89-95) ===
+        0x80,
+        0x3E,
+        lo(source_ds),
+        hi(source_ds),
+        0x01, // 89: CMP byte [source], 1
+        0x75,
+        0x08, // 94: JNE +8 → 104 (putchar_exit)
+        // === get_command exit (bytes 96-103) ===
+        0x80,
+        0x3E,
+        0x93,
+        0x58,
+        0x21, // 96: CMP byte [0x5893], 0x21
+        0xE9,
+        gd[0],
+        gd[1], // 101: JMP get_command resume
+        // === putchar exit (bytes 104-109) ===
+        0x55, // 104: PUSH BP
+        0x8B,
+        0xEC, // 105: MOV BP, SP
+        0xE9,
+        pd[0],
+        pd[1], // 107: JMP putchar resume
     ]
 }
 
@@ -435,7 +512,7 @@ pub fn apply_patch(mem: &dyn MemoryAccess, dos_base: usize) -> Result<PatchState
                 return Ok(PatchState {
                     cs_base,
                     cave_cs_offset: target,
-                    original_hook: current_hook, // already a JMP
+                    original_hook: current_hook,
                     original_cave: [0; CAVE_SIZE],
                     flag_addr,
                     trap_flag_addr,
@@ -646,76 +723,68 @@ mod tests {
         let cave = 0x5001usize;
         let (flag_ds, trap_ds, sp_ds, bp_ds, src_ds) = ds_offsets();
         let bytes = encode_cave(cave, flag_ds, trap_ds, sp_ds, bp_ds, src_ds);
+        assert_eq!(bytes.len(), CAVE_SIZE);
 
-        // === Entry A: get_command ===
-        // Redraw check (bytes 0-14)
+        // Entry A: redraw check
         assert_eq!(bytes[0], 0x80); // CMP
         assert_eq!(bytes[5], 0x74); // JE
-        assert_eq!(bytes[6], 0x08); // +8 -> byte 15
-        // Trap check at byte 15
-        assert_eq!(bytes[15], 0x80); // CMP
-        assert_eq!(bytes[19], 0x01); // compare to 1
+        assert_eq!(bytes[6], 0x08); // +8 -> 15
+        // Trap check → get_cmd_exit at 96
         assert_eq!(bytes[20], 0x75); // JNE
-        assert_eq!(bytes[21], 0x36); // +54 -> byte 76 (get_cmd_exit)
-        // Source marker at byte 22
-        assert_eq!(bytes[22], 0xC6); // MOV byte
-        assert_eq!(bytes[26], 0x01); // source = 1
-        assert_eq!(bytes[27], 0xEB); // JMP short
-        assert_eq!(bytes[28], 0x0C); // +12 -> byte 41 (common)
+        assert_eq!(bytes[21], 0x4A); // +74 -> 96
+        // Source = 1, JMP common
+        assert_eq!(bytes[26], 0x01);
+        assert_eq!(bytes[27], 0xEB);
+        assert_eq!(bytes[28], 0x0C); // +12 -> 41
 
-        // === Entry B: putchar ===
-        assert_eq!(bytes[29], 0x80); // CMP
-        assert_eq!(bytes[33], 0x01); // compare to 1
+        // Entry B: putchar → putchar_exit at 115
         assert_eq!(bytes[34], 0x75); // JNE
-        assert_eq!(bytes[35], 0x30); // +48 -> byte 84 (putchar_exit)
-        assert_eq!(bytes[36], 0xC6); // MOV byte
+        assert_eq!(bytes[35], 0x44); // +68 -> 104
         assert_eq!(bytes[40], 0x02); // source = 2
 
-        // === Common trap ===
-        // Save SP at byte 41
-        assert_eq!(bytes[41], 0x89);
-        assert_eq!(bytes[42], 0x26);
-        // Save BP at byte 45
-        assert_eq!(bytes[45], 0x89);
-        assert_eq!(bytes[46], 0x2E);
-        // Ack at byte 49
-        assert_eq!(bytes[49], 0xC6);
-        assert_eq!(bytes[53], 0x02);
-        // Spin at byte 54
-        assert_eq!(bytes[54], 0x80);
-        assert_eq!(bytes[59], 0x75);
-        assert_eq!(bytes[60], 0xF9); // -7 -> byte 54
-        // Restore SP at byte 61
-        assert_eq!(bytes[61], 0x8B);
-        assert_eq!(bytes[62], 0x26);
-        // Restore BP at byte 65
-        assert_eq!(bytes[65], 0x8B);
-        assert_eq!(bytes[66], 0x2E);
-        // Source check at byte 69
-        assert_eq!(bytes[69], 0x80);
-        assert_eq!(bytes[73], 0x01);
-        assert_eq!(bytes[74], 0x75); // JNE
-        assert_eq!(bytes[75], 0x08); // +8 -> byte 84
+        // Save SP/BP at 41-48, OPL setup at 49-56 (before ack)
+        assert_eq!(bytes[49], 0xB9); // MOV CX, 9
+        assert_eq!(bytes[52], 0xB3);
+        assert_eq!(bytes[53], 0xB0); // MOV BL, 0xB0
+        assert_eq!(bytes[54], 0xBA);
+        assert_eq!(bytes[55], 0x88);
+        assert_eq!(bytes[56], 0x03); // MOV DX, 0x388
+        // Ack at 57, spin at 62
+        assert_eq!(bytes[61], 0x02); // trap_flag = 2
+        assert_eq!(bytes[67], 0x75);
+        assert_eq!(bytes[68], 0xF9); // JNE -7 → 62
+        // Restore SP/BP at 69-76
+        assert_eq!(bytes[69], 0x8B);
+        assert_eq!(bytes[70], 0x26); // MOV SP, [sp]
+        assert_eq!(bytes[73], 0x8B);
+        assert_eq!(bytes[74], 0x2E); // MOV BP, [bp]
+        // OPL reset loop at 77-88
+        assert_eq!(bytes[77], 0x8A);
+        assert_eq!(bytes[78], 0xC3); // MOV AL, BL
+        assert_eq!(bytes[79], 0xEE); // OUT DX, AL
+        assert_eq!(bytes[80], 0x42); // INC DX
+        assert_eq!(bytes[83], 0xEE); // OUT DX, AL
+        assert_eq!(bytes[84], 0x4A); // DEC DX
+        assert_eq!(bytes[87], 0xE2);
+        assert_eq!(bytes[88], 0xF4); // LOOP -12 → 77
+        // Source routing at 89
+        assert_eq!(bytes[89], 0x80); // CMP source, 1
+        assert_eq!(bytes[94], 0x75);
+        assert_eq!(bytes[95], 0x08); // JNE +8 → 104
+        // get_command exit at 96
+        assert_eq!(&bytes[96..101], &HOOK_BYTES);
+        // putchar exit at 104
+        assert_eq!(bytes[104], 0x55); // PUSH BP
+        assert_eq!(bytes[105], 0x8B);
+        assert_eq!(bytes[106], 0xEC); // MOV BP, SP
 
-        // === get_command exit ===
-        assert_eq!(&bytes[76..81], &HOOK_BYTES);
-
-        // === putchar exit ===
-        assert_eq!(bytes[84], 0x55); // PUSH BP
-        assert_eq!(bytes[85], 0x8B); // MOV BP, SP
-        assert_eq!(bytes[86], 0xEC);
-
-        // CALL targets 0x2900
+        // Displacement targets
         let cd = i16::from_le_bytes([bytes[13], bytes[14]]);
         assert_eq!((cave as i32 + 15 + cd as i32) as usize, REDRAW_OFFSET);
-
-        // JMP at 81 targets HOOK_RESUME from byte 84
-        let gd = i16::from_le_bytes([bytes[82], bytes[83]]);
-        assert_eq!((cave as i32 + 84 + gd as i32) as usize, HOOK_RESUME);
-
-        // JMP at 87 targets PUTCHAR_RESUME from byte 90
-        let pd = i16::from_le_bytes([bytes[88], bytes[89]]);
-        assert_eq!((cave as i32 + 90 + pd as i32) as usize, PUTCHAR_RESUME);
+        let gd = i16::from_le_bytes([bytes[102], bytes[103]]);
+        assert_eq!((cave as i32 + 104 + gd as i32) as usize, HOOK_RESUME);
+        let pd = i16::from_le_bytes([bytes[108], bytes[109]]);
+        assert_eq!((cave as i32 + 110 + pd as i32) as usize, PUTCHAR_RESUME);
     }
 
     #[test]
@@ -724,17 +793,12 @@ mod tests {
             let (flag_ds, trap_ds, sp_ds, bp_ds, src_ds) = ds_offsets();
             let bytes = encode_cave(cave, flag_ds, trap_ds, sp_ds, bp_ds, src_ds);
 
-            // CALL targets redraw
             let cd = i16::from_le_bytes([bytes[13], bytes[14]]);
             assert_eq!((cave as i32 + 15 + cd as i32) as usize, REDRAW_OFFSET);
-
-            // get_command resume JMP
-            let gd = i16::from_le_bytes([bytes[82], bytes[83]]);
-            assert_eq!((cave as i32 + 84 + gd as i32) as usize, HOOK_RESUME);
-
-            // putchar resume JMP
-            let pd = i16::from_le_bytes([bytes[88], bytes[89]]);
-            assert_eq!((cave as i32 + 90 + pd as i32) as usize, PUTCHAR_RESUME);
+            let gd = i16::from_le_bytes([bytes[102], bytes[103]]);
+            assert_eq!((cave as i32 + 104 + gd as i32) as usize, HOOK_RESUME);
+            let pd = i16::from_le_bytes([bytes[108], bytes[109]]);
+            assert_eq!((cave as i32 + 110 + pd as i32) as usize, PUTCHAR_RESUME);
         }
     }
 
