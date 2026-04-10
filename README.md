@@ -60,6 +60,15 @@ Typical workflow:
 4. If only one DOSBox process is available, the app will try to attach automatically.
 5. If multiple processes are present, select the right one from the connection bar.
 
+## Releasing
+
+GitHub Actions publishes tagged Windows releases automatically. Update the version in `Cargo.toml`, then push a matching tag in the form `vX.Y.Z` such as `v0.1.0`. CI verifies that the tag and Cargo version match, then it will:
+
+- run formatting, clippy, and tests
+- build the release binary
+- package `ninth-virtue.exe` with the README and license files
+- create or update the matching GitHub Release entry and upload the zip asset
+
 ## How It Works
 
 At a high level, the app:

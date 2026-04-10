@@ -2,6 +2,10 @@ name: CI
 
 on:
   push:
+    branches:
+      - "**"
+    tags:
+      - "v*"
   pull_request:
   workflow_dispatch:
 
@@ -14,6 +18,8 @@ env:
 jobs:
   windows:
     runs-on: windows-latest
+    outputs:
+      release_archive: ${{ steps.release_meta.outputs.archive_name }}
 
     steps:
       - name: Check out repository
@@ -35,3 +41,98 @@ jobs:
 
       - name: Run tests
         run: cargo test --locked
+
+      - name: Prepare release metadata
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        id: release_meta
+        shell: pwsh
+        run: |
+          $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
+          $rootPackageId = $metadata.workspace_default_members | Select-Object -First 1
+          $package = $metadata.packages | Where-Object { $_.id -eq $rootPackageId } | Select-Object -First 1
+
+          if (-not $package) {
+            throw "Workspace root package was not found in cargo metadata."
+          }
+
+          $binaryName = $package.default_run
+          if (-not $binaryName) {
+            $binaryName = ($package.targets | Where-Object { $_.kind -contains 'bin' } | Select-Object -First 1).name
+          }
+
+          if (-not $binaryName) {
+            throw "No binary target was found for the workspace root package."
+          }
+
+          $expectedTag = "v$($package.version)"
+          if ($env:GITHUB_REF_NAME -ne $expectedTag) {
+            throw "Tag '$env:GITHUB_REF_NAME' does not match Cargo.toml version '$($package.version)'. Expected tag '$expectedTag'."
+          }
+
+          $archiveName = "$binaryName-$($env:GITHUB_REF_NAME)-windows-x86_64.zip"
+
+          "binary_name=$binaryName" >> $env:GITHUB_OUTPUT
+          "archive_name=$archiveName" >> $env:GITHUB_OUTPUT
+
+      - name: Build release binary
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        run: cargo build --locked --release --bin "${{ steps.release_meta.outputs.binary_name }}"
+
+      - name: Package release archive
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        id: package
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $binaryName = "${{ steps.release_meta.outputs.binary_name }}"
+          $archiveName = "${{ steps.release_meta.outputs.archive_name }}"
+          $packageName = [System.IO.Path]::GetFileNameWithoutExtension($archiveName)
+          $packageRoot = Join-Path $env:RUNNER_TEMP $packageName
+          $archivePath = Join-Path $env:RUNNER_TEMP $archiveName
+
+          if (Test-Path $packageRoot) {
+            Remove-Item $packageRoot -Recurse -Force
+          }
+
+          New-Item -ItemType Directory -Path $packageRoot | Out-Null
+          Copy-Item "target/release/$binaryName.exe" -Destination $packageRoot
+          Copy-Item "README.md" -Destination $packageRoot
+          Copy-Item "LICENSE-MIT" -Destination $packageRoot
+          Copy-Item "LICENSE-APACHE" -Destination $packageRoot
+
+          if (Test-Path $archivePath) {
+            Remove-Item $archivePath -Force
+          }
+
+          Compress-Archive -Path $packageRoot -DestinationPath $archivePath
+
+          "archive_path=$archivePath" >> $env:GITHUB_OUTPUT
+
+      - name: Upload release artifact
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-package
+          path: ${{ steps.package.outputs.archive_path }}
+          if-no-files-found: error
+
+  release:
+    needs: windows
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-package
+          path: release-assets
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/${{ needs.windows.outputs.release_archive }}
+          fail_on_unmatched_files: true
+          generate_release_notes: true
