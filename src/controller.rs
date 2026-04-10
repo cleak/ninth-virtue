@@ -383,14 +383,24 @@ impl GameController {
 
     pub fn trigger_redraw(&self) -> Result<()> {
         let (mem, _) = self.require_patched()?;
-        let patch = self.patch.as_ref().unwrap();
+        let patch = self
+            .patch
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no patch state"))?;
         injection::trigger_redraw(mem, patch)
     }
 
     pub fn request_save(&mut self, slot: usize) -> Result<()> {
-        self.require_patched()?;
-        let patch = self.patch.as_ref().unwrap();
-        let mem = &self.process.as_ref().unwrap().memory;
+        let (_, _) = self.require_patched()?;
+        let patch = self
+            .patch
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no patch state"))?;
+        let mem = &self
+            .process
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("not connected"))?
+            .memory;
         mem.write_u8(patch.trap_flag_addr(), 1)?;
         self.phase = Phase::Trapping {
             since: Instant::now(),
@@ -400,9 +410,16 @@ impl GameController {
     }
 
     pub fn request_load(&mut self, slot: usize) -> Result<()> {
-        self.require_patched()?;
-        let patch = self.patch.as_ref().unwrap();
-        let mem = &self.process.as_ref().unwrap().memory;
+        let (_, _) = self.require_patched()?;
+        let patch = self
+            .patch
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no patch state"))?;
+        let mem = &self
+            .process
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("not connected"))?
+            .memory;
         mem.write_u8(patch.trap_flag_addr(), 1)?;
         self.phase = Phase::Trapping {
             since: Instant::now(),

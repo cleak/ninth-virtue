@@ -1,11 +1,8 @@
 //! Save-state system: deterministic snapshot/restore of DOS memory.
 //!
 //! Uses the code-cave trap mechanism to pause emulated execution at a
-//! known quiescent point (`get_command`), then reads or writes the full
-//! 1 MB DOS address space while the game is deterministically frozen.
-//!
-//! See the plan in `.claude/plans/goofy-jumping-valiant.md` for the
-//! full design rationale.
+//! known quiescent point (`get_command` or `putchar`), then reads or
+//! writes the full 1 MB DOS address space while the game is frozen.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -47,9 +44,9 @@ pub const NUM_SLOTS: usize = 5;
 
 /// Lightweight metadata for displaying a save slot in the UI.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // location_id reserved for future UI mode-mismatch warnings
 pub struct SlotInfo {
     pub timestamp: i64,
+    #[allow(dead_code)] // stored for potential future mode-mismatch warnings
     pub location_id: u8,
     pub location: String,
     pub leader_name: String,
