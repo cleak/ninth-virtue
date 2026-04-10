@@ -4,7 +4,6 @@ debug/
 *.pdb
 
 # Cargo
-Cargo.lock
 
 # Editor/IDE
 .idea/
