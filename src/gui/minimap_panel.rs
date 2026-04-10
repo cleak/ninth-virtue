@@ -616,6 +616,8 @@ mod tests {
         assert!(state.last_grid_source.is_none());
 
         let gpu = state.gpu.lock().unwrap();
+        // clear() must drop the GL-backed renderer so the next paint callback rebuilds it.
+        assert!(gpu.renderer.is_none());
         assert!(!gpu.grid_dirty);
         assert!(gpu.grid_data.is_empty());
         assert!(gpu.objects_data.is_empty());
