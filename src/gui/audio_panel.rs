@@ -10,7 +10,7 @@ pub fn show(ui: &mut egui::Ui, session: &Option<AudioSession>, volume: &mut f32,
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         ui.label(egui::RichText::new("🔊").heading());
-        ui.label(egui::RichText::new("Music").heading().color(HEADING_COLOR));
+        ui.label(egui::RichText::new("Sound").heading().color(HEADING_COLOR));
     });
 
     let enabled = session.is_some();
