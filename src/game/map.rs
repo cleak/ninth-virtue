@@ -31,6 +31,14 @@ impl LocationType {
         }
     }
 
+    /// Return a named non-overworld location by its DATA.OVL table index.
+    pub(crate) fn named_location(id: u8) -> Option<Self> {
+        match id {
+            1..=40 => Some(Self::from_id(id)),
+            _ => None,
+        }
+    }
+
     /// Human-readable name for the location.
     pub fn name(&self) -> &'static str {
         match self {
