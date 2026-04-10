@@ -475,31 +475,10 @@ impl eframe::App for UltimaCompanion {
         // --- Memory watch window ---
         gui::memory_watch_panel::show(ctx, memory_watch, mem);
 
-        // --- Mini-map (anchored bottom panel) ---
-        egui::TopBottomPanel::bottom("minimap")
-            .min_height(300.0)
-            .resizable(true)
-            .show(ctx, |ui| {
-                gui::section_frame(ui).show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    if let Some(atlas) = tile_atlas.as_ref() {
-                        gui::minimap_panel::show(ui, minimap, atlas, world_map.as_ref());
-                    } else if attached.is_some() {
-                        // Only show load errors when actually attached to a process
-                        let status = match game_dir {
-                            Some(dir) => format!("Tiles not found in {}", dir.display()),
-                            None => "Game directory not found — could not locate DOSBox config"
-                                .to_string(),
-                        };
-                        gui::minimap_panel::show_no_atlas(ui, &status);
-                    }
-                });
-            });
-
         // --- Party, inventory, actions ---
         let mut game_written = false;
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::TopBottomPanel::top("dashboard").show(ctx, |ui| {
             gui::section_frame(ui).show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 game_written |=
@@ -510,23 +489,41 @@ impl eframe::App for UltimaCompanion {
 
             ui.columns(4, |cols| {
                 gui::section_frame(&cols[0]).show(&mut cols[0], |ui| {
-                    ui.set_min_size(ui.available_size());
+                    ui.set_min_width(ui.available_width());
                     game_written |= gui::inventory_panel::show_resources(ui, inventory, mem);
                 });
                 gui::section_frame(&cols[1]).show(&mut cols[1], |ui| {
-                    ui.set_min_size(ui.available_size());
+                    ui.set_min_width(ui.available_width());
                     game_written |= gui::inventory_panel::show_reagents(ui, inventory, mem);
                 });
                 gui::section_frame(&cols[2]).show(&mut cols[2], |ui| {
-                    ui.set_min_size(ui.available_size());
+                    ui.set_min_width(ui.available_width());
                     game_written |= gui::actions_panel::show(ui, party, inventory, frigates, mem);
                     ui.add_space(8.0);
                     gui::audio_panel::show(ui, audio_session, audio_volume, audio_muted);
                 });
                 gui::section_frame(&cols[3]).show(&mut cols[3], |ui| {
-                    ui.set_min_size(ui.available_size());
+                    ui.set_min_width(ui.available_width());
                     gui::quest_panel::show(ui, shrine_quest);
                 });
+            });
+        });
+
+        // --- Mini-map (fills all remaining space) ---
+        egui::CentralPanel::default().show(ctx, |ui| {
+            gui::section_frame(ui).show(ui, |ui| {
+                ui.set_min_size(ui.available_size());
+                if let Some(atlas) = tile_atlas.as_ref() {
+                    gui::minimap_panel::show(ui, minimap, atlas, world_map.as_ref());
+                } else if attached.is_some() {
+                    // Only show load errors when actually attached to a process
+                    let status = match game_dir {
+                        Some(dir) => format!("Tiles not found in {}", dir.display()),
+                        None => "Game directory not found - could not locate DOSBox config"
+                            .to_string(),
+                    };
+                    gui::minimap_panel::show_no_atlas(ui, &status);
+                }
             });
         });
 
