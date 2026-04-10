@@ -604,8 +604,9 @@ fn paint_overworld_overlay(
     }
 }
 
-/// Paint the current player location with a screen-space marker that remains
-/// readable even when the visible map contains hundreds of tiles.
+/// Paint the current player location with a screen-space marker that keeps a
+/// readable minimum size while still expanding to nearly fill the tile at
+/// close zoom.
 fn paint_player_marker(ui: &egui::Ui, rect: Rect, grid_dims: (u32, u32), player_tile: [f32; 2]) {
     if grid_dims.0 == 0 || grid_dims.1 == 0 {
         return;
@@ -636,9 +637,10 @@ fn player_marker_center(rect: Rect, grid_dims: (u32, u32), player_tile: [f32; 2]
     )
 }
 
-/// Pick a marker size that mostly stays fixed on screen while still growing a
-/// bit at close zoom, then switch to a solid dot once tiles are too small to
-/// preserve an obvious hollow center.
+/// Pick a marker size with a readable minimum screen-space footprint, then let
+/// it grow with the visible tile size until it nearly fills the tile. Switch
+/// to a solid dot once tiles are too small to preserve an obvious hollow
+/// center.
 fn player_marker_style(tile_span_px: f32) -> PlayerMarkerStyle {
     PlayerMarkerStyle {
         radius: (tile_span_px * 0.5 - PLAYER_MARKER_TILE_MARGIN_PX).max(PLAYER_MARKER_MIN_RADIUS),
@@ -780,7 +782,7 @@ mod tests {
     }
 
     #[test]
-    fn player_marker_radius_is_clamped_across_zoom_levels() {
+    fn player_marker_radius_has_screen_space_floor_and_grows_with_tiles() {
         assert_eq!(player_marker_style(1.0).radius, PLAYER_MARKER_MIN_RADIUS);
         assert_eq!(player_marker_style(32.0).radius, 13.0);
     }
