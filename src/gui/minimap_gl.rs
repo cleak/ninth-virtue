@@ -289,7 +289,7 @@ impl MinimapGl {
             );
             gl.bind_texture(glow::TEXTURE_2D, None);
 
-            let filtered_atlas_texture = create_filtered_atlas_texture(gl);
+            let filtered_atlas_texture = create_mipmapped_rgba_texture(gl);
             gl.bind_texture(glow::TEXTURE_2D, Some(filtered_atlas_texture));
             let filtered_atlas_buf = rearrange_filtered_atlas(atlas_rgba);
             gl.tex_image_2d(
@@ -311,7 +311,7 @@ impl MinimapGl {
 
             // Object overlay texture: same dimensions as grid, filled via update_objects
             let objects_texture = create_r8_texture(gl);
-            let lowpass_texture = create_lowpass_texture(gl);
+            let lowpass_texture = create_mipmapped_rgba_texture(gl);
 
             Self {
                 program,
@@ -409,13 +409,13 @@ impl MinimapGl {
             gl.bind_vertex_array(None);
 
             // Clean up bindings
-            gl.active_texture(glow::TEXTURE2);
-            gl.bind_texture(glow::TEXTURE_2D, None);
-            gl.active_texture(glow::TEXTURE1);
+            gl.active_texture(glow::TEXTURE4);
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.active_texture(glow::TEXTURE3);
             gl.bind_texture(glow::TEXTURE_2D, None);
-            gl.active_texture(glow::TEXTURE4);
+            gl.active_texture(glow::TEXTURE2);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.active_texture(glow::TEXTURE1);
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, None);
@@ -469,38 +469,8 @@ fn create_r8_texture(gl: &glow::Context) -> glow::Texture {
     }
 }
 
-/// Create an RGBA texture configured for tile-safe mipmapped atlas sampling.
-fn create_filtered_atlas_texture(gl: &glow::Context) -> glow::Texture {
-    unsafe {
-        let tex = gl.create_texture().unwrap();
-        gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-        gl.tex_parameter_i32(
-            glow::TEXTURE_2D,
-            glow::TEXTURE_MIN_FILTER,
-            glow::LINEAR_MIPMAP_LINEAR as i32,
-        );
-        gl.tex_parameter_i32(
-            glow::TEXTURE_2D,
-            glow::TEXTURE_MAG_FILTER,
-            glow::LINEAR as i32,
-        );
-        gl.tex_parameter_i32(
-            glow::TEXTURE_2D,
-            glow::TEXTURE_WRAP_S,
-            glow::CLAMP_TO_EDGE as i32,
-        );
-        gl.tex_parameter_i32(
-            glow::TEXTURE_2D,
-            glow::TEXTURE_WRAP_T,
-            glow::CLAMP_TO_EDGE as i32,
-        );
-        gl.bind_texture(glow::TEXTURE_2D, None);
-        tex
-    }
-}
-
-/// Create an RGBA texture configured for mipmapped overview sampling.
-fn create_lowpass_texture(gl: &glow::Context) -> glow::Texture {
+/// Create an RGBA texture configured for mipmapped sampling.
+fn create_mipmapped_rgba_texture(gl: &glow::Context) -> glow::Texture {
     unsafe {
         let tex = gl.create_texture().unwrap();
         gl.bind_texture(glow::TEXTURE_2D, Some(tex));
