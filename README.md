@@ -2,9 +2,9 @@
 
 The Ninth Virtue: Convenience.
 
-`ninth-virtue` is an unofficial companion app for Ultima V that plugs into a live DOSBox or DOSBox Staging session and turns the game's opaque memory into a modern control panel. It is built for players who still want the original game and original atmosphere, but would not mind a second screen that can surface party state, quest progress, map data, and a few mercy buttons when Britannia gets rough.
+`ninth-virtue` is an unofficial Windows companion app for Ultima V that attaches to a live DOSBox or DOSBox Staging session and turns the game's memory into a second-screen control panel. It surfaces party state, quest progress, map data, and a handful of recovery actions without replacing the original game client.
 
-This is not a ROM hack, not a save editor in disguise, and not a replacement client. It is a live companion that attaches to the emulator process, discovers the emulated DOS memory base at runtime, and reads or writes known Ultima V data structures in place.
+This is not a ROM hack, not a save-file editor, and not a replacement engine. It reads and writes known Ultima V runtime structures inside the emulator process while the game is running.
 
 ## What It Does
 
@@ -18,45 +18,31 @@ This is not a ROM hack, not a save editor in disguise, and not a replacement cli
 - Renders an experimental live minimap from in-memory tile and object data
 - Includes debugging tools for memory watching and reverse-engineering work
 
+## Scope And Disclaimers
+
+- `ninth-virtue` is an unofficial fan project. It is not affiliated with or endorsed by the rights holders of Ultima, DOSBox, or DOSBox Staging.
+- You must supply your own legally obtained copy of Ultima V and your own emulator setup. This repository does not include game data, ROMs, copyrighted art, or other proprietary Ultima V assets.
+- The app reads and writes another local process's memory. Use it at your own risk, and keep backups of your saves before relying on live edits.
+- This is a single-player quality-of-life and reverse-engineering tool. It is not intended as an anti-cheat bypass, multiplayer tool, or general-purpose memory editor.
+
 ## Why This Exists
 
-Ultima V is brilliant, but it was never designed to have an observer's dashboard. `ninth-virtue` treats the running game as the source of truth and builds a companion UI around it. The result is a tool that feels more like a cockpit than a cheat menu: you can inspect the party at a glance, see the shape of the world, understand shrine progression, and intervene quickly without digging through hex dumps or restarting the session.
+Ultima V is brilliant, but it was never designed to have an observer's dashboard. `ninth-virtue` treats the running game as the source of truth and builds a companion UI around it. The result is closer to a cockpit than a cheat menu: you can inspect the party at a glance, see the shape of the world, understand shrine progression, and intervene quickly without digging through hex dumps or restarting the session.
 
 For players, it is a quality-of-life layer.
 
 For reverse engineers, it is a concrete example of process attachment, emulator memory scanning, and live state extraction from a classic DOS game.
 
-## Screenshots
-
-This section is intentionally left open so screenshots can be dropped in without rewriting the README.
-
-Suggested captures:
-
-- Main window while attached to a live game
-- Party and inventory panels
-- Shrine quest tracker
-- Overworld minimap
-- Audio controls and connection bar
-
-Example placement:
-
-```md
-![Main window](docs/screenshots/main-window.png)
-![Overworld minimap](docs/screenshots/minimap.png)
-```
-
-## Running It
-
-This project is currently aimed at local development and experimentation.
-
-Requirements:
+## Requirements
 
 - Windows
 - Rust toolchain
 - A running DOSBox or DOSBox Staging process
-- Ultima V available in that process; loading into the game before attaching is recommended for the fastest startup path
+- Ultima V already available inside that process
 
-Build and run:
+## Running It
+
+This project is currently source-first: build it locally and attach to your own running game session.
 
 ```bash
 cargo run --release
@@ -80,7 +66,14 @@ At a high level, the app:
 4. Reads and writes game state using known save-relative offsets.
 5. Applies a small in-memory redraw hook so the party stats panel refreshes after companion-driven changes.
 
-The redraw mechanism is intentionally runtime-only. It does not modify game files on disk.
+The redraw mechanism is runtime-only. It does not modify game files on disk.
+
+## Caveats
+
+- Windows only
+- Appropriate local permissions are required to inspect and modify another process
+- The minimap path depends on locating the mounted Ultima V game directory from the DOSBox configuration
+- The project is still evolving, and the reverse-engineering notes are part of the product rather than background-only documentation
 
 ## Project Structure
 
@@ -91,23 +84,22 @@ The redraw mechanism is intentionally runtime-only. It does not modify game file
 - [src/tiles](src/tiles): tile decoding and atlas support for map rendering
 - [src/bin](src/bin): CLI tools for scanning, poking, and memory diff experiments
 
-If you want the lower-level details, start here:
+For lower-level details, start here:
 
 - [docs/dosbox-internals.md](docs/dosbox-internals.md)
 - [docs/memory-map.md](docs/memory-map.md)
 - [docs/redraw-mechanism.md](docs/redraw-mechanism.md)
 - [docs/reverse-engineering.md](docs/reverse-engineering.md)
 
-## Caveats
+## Contributing
 
-- Windows only
-- Reads and writes another process's memory via Windows APIs, so appropriate local permissions are required
-- The minimap path depends on locating the mounted Ultima V game directory from the DOSBox configuration
-- This project is still evolving, and the reverse-engineering notes are part of the product, not just background material
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for development expectations and contribution licensing terms.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this project is dual-licensed as `MIT OR Apache-2.0`, without additional terms or conditions.
 
 ## License
 
-Licensed under either of:
+This project is licensed under either of:
 
 - [MIT License](LICENSE-MIT)
 - [Apache License, Version 2.0](LICENSE-APACHE)
