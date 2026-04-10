@@ -58,6 +58,12 @@ struct OverworldOverlayOptions {
     label_filters: LabelFilters,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GridSource {
+    Local,
+    Overworld,
+}
+
 /// Shared state accessed by both the UI thread (for updates) and the paint
 /// callback (for rendering). Protected by a mutex.
 struct GpuState {
@@ -79,6 +85,7 @@ pub struct MinimapState {
     label_filters: LabelFilters,
     last_center: Option<(u8, u8)>,
     last_zoom: Option<usize>,
+    last_grid_source: Option<GridSource>,
 }
 
 impl Default for MinimapState {
@@ -99,6 +106,7 @@ impl Default for MinimapState {
             label_filters: LabelFilters::default(),
             last_center: None,
             last_zoom: None,
+            last_grid_source: None,
         }
     }
 }
@@ -106,6 +114,22 @@ impl Default for MinimapState {
 impl MinimapState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Clear cached map data so the next loaded snapshot forces a fresh upload.
+    pub fn clear(&mut self) {
+        self.map = None;
+        self.raw_atlas = None;
+        self.last_center = None;
+        self.last_zoom = None;
+        self.last_grid_source = None;
+
+        let mut gpu = self.gpu.lock().unwrap();
+        gpu.grid_dirty = false;
+        gpu.grid_data.clear();
+        gpu.objects_data.clear();
+        gpu.grid_dims = (0, 0);
+        gpu.player_tile = [0.0, 0.0];
     }
 }
 
@@ -171,12 +195,19 @@ pub fn show(
     let zoom = state.zoom;
     let cx = map.x;
     let cy = map.y;
+    let grid_source = if is_overworld && world_map.is_some() {
+        GridSource::Overworld
+    } else {
+        GridSource::Local
+    };
 
     // Prepare tile grid data on CPU when map state changes.
     // Object positions change every game turn, so always update when objects are present.
     let has_objects = !map.objects.is_empty();
-    let needs_update =
-        state.last_center != Some((cx, cy)) || state.last_zoom != Some(zoom) || has_objects;
+    let needs_update = state.last_center != Some((cx, cy))
+        || state.last_zoom != Some(zoom)
+        || state.last_grid_source != Some(grid_source)
+        || has_objects;
 
     if needs_update {
         let (grid_data, grid_w, grid_h, player_tile) =
@@ -203,6 +234,7 @@ pub fn show(
 
         state.last_center = Some((cx, cy));
         state.last_zoom = Some(zoom);
+        state.last_grid_source = Some(grid_source);
     }
 
     // Allocate a centered square region for the minimap
@@ -539,5 +571,54 @@ mod tests {
 
         assert_eq!(shrine.category(), WorldLabelCategory::Shrine);
         assert_eq!(shrine.name(), "Honor");
+    }
+
+    #[test]
+    fn grid_source_distinguishes_local_and_overworld_textures() {
+        assert_ne!(GridSource::Local, GridSource::Overworld);
+    }
+
+    #[test]
+    fn clear_resets_cached_grid_state() {
+        let mut state = MinimapState::new();
+        state.map = Some(MapState {
+            location: LocationType::Overworld,
+            z: 0xFF,
+            x: 1,
+            y: 2,
+            transport: 0,
+            scroll_x: 0,
+            scroll_y: 0,
+            tiles: [0; 1024],
+            objects: Vec::new(),
+        });
+        state.last_center = Some((1, 2));
+        state.last_zoom = Some(32);
+        state.last_grid_source = Some(GridSource::Overworld);
+        state.raw_atlas = Some(Arc::new(vec![1, 2, 3]));
+
+        {
+            let mut gpu = state.gpu.lock().unwrap();
+            gpu.grid_dirty = true;
+            gpu.grid_data = vec![1];
+            gpu.objects_data = vec![2];
+            gpu.grid_dims = (3, 4);
+            gpu.player_tile = [5.0, 6.0];
+        }
+
+        state.clear();
+
+        assert!(state.map.is_none());
+        assert!(state.raw_atlas.is_none());
+        assert!(state.last_center.is_none());
+        assert!(state.last_zoom.is_none());
+        assert!(state.last_grid_source.is_none());
+
+        let gpu = state.gpu.lock().unwrap();
+        assert!(!gpu.grid_dirty);
+        assert!(gpu.grid_data.is_empty());
+        assert!(gpu.objects_data.is_empty());
+        assert_eq!(gpu.grid_dims, (0, 0));
+        assert_eq!(gpu.player_tile, [0.0, 0.0]);
     }
 }

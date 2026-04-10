@@ -208,7 +208,7 @@ impl UltimaCompanion {
         self.inventory = Inventory::default();
         self.shrine_quest = ShrineQuest::default();
         self.frigates.clear();
-        self.minimap.map = None;
+        self.minimap.clear();
         self.game_dir = None;
         self.tile_atlas = None;
         self.world_map = None;
@@ -268,7 +268,7 @@ impl UltimaCompanion {
         self.inventory = Inventory::default();
         self.shrine_quest = ShrineQuest::default();
         self.frigates.clear();
-        self.minimap.map = None;
+        self.minimap.clear();
         self.game_dir = None;
         self.tile_atlas = None;
         self.world_map = None;

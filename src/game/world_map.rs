@@ -17,6 +17,7 @@ const DATA_OVL_SHRINE_Y: usize = 0x1F86;
 /// Tile ID used for water-only chunks.
 const WATER_TILE: u8 = 0x01;
 
+/// Filter categories exposed by the overworld minimap label controls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorldLabelCategory {
     Town,
@@ -27,6 +28,7 @@ pub enum WorldLabelCategory {
     Shrine,
 }
 
+/// Semantic type of a parsed overworld label entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorldLabelKind {
     Location(LocationType),
@@ -36,12 +38,16 @@ pub enum WorldLabelKind {
 /// A named overworld entrance read from DATA.OVL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorldLocation {
+    /// The source kind used to derive the label name and category.
     pub kind: WorldLabelKind,
+    /// Britannia overworld X coordinate.
     pub x: u8,
+    /// Britannia overworld Y coordinate.
     pub y: u8,
 }
 
 impl WorldLocation {
+    /// Display name shown in the minimap overlay.
     pub fn name(self) -> &'static str {
         match self.kind {
             WorldLabelKind::Location(location) => location.name(),
@@ -49,6 +55,7 @@ impl WorldLocation {
         }
     }
 
+    /// Filter bucket used by the minimap label controls.
     pub fn category(self) -> WorldLabelCategory {
         match self.kind {
             WorldLabelKind::Location(location) => match location {
@@ -145,6 +152,7 @@ impl WorldMap {
         self.tiles[y as usize * 256 + x as usize]
     }
 
+    /// Return all parsed overworld label points from DATA.OVL.
     pub fn locations(&self) -> &[WorldLocation] {
         &self.locations
     }
@@ -192,7 +200,7 @@ fn parse_shrines(ovl: &[u8]) -> Result<Vec<WorldLocation>> {
         let y = ys[idx];
 
         // DATA.OVL encodes the non-overworld Shrine of Spirituality as (0, 0).
-        if x == 0 && y == 0 {
+        if virtue == Virtue::Spirituality && x == 0 && y == 0 {
             continue;
         }
 
@@ -293,19 +301,26 @@ mod tests {
     }
 
     #[test]
-    fn parse_shrine_coordinates_skips_non_overworld_entry() {
+    fn parse_shrine_coordinates_only_skips_spirituality_sentinel() {
         let mut ovl = vec![0u8; DATA_OVL_SHRINE_Y + Virtue::ALL.len()];
+        for idx in 0..Virtue::ALL.len() {
+            ovl[DATA_OVL_SHRINE_X + idx] = idx as u8 + 10;
+            ovl[DATA_OVL_SHRINE_Y + idx] = idx as u8 + 20;
+        }
+
         ovl[DATA_OVL_SHRINE_X] = 233;
         ovl[DATA_OVL_SHRINE_Y] = 66;
         ovl[DATA_OVL_SHRINE_X + 1] = 128;
         ovl[DATA_OVL_SHRINE_Y + 1] = 92;
+        ovl[DATA_OVL_SHRINE_X + 2] = 0;
+        ovl[DATA_OVL_SHRINE_Y + 2] = 0;
         ovl[DATA_OVL_SHRINE_X + 6] = 0;
         ovl[DATA_OVL_SHRINE_Y + 6] = 0;
         ovl[DATA_OVL_SHRINE_X + 7] = 231;
         ovl[DATA_OVL_SHRINE_Y + 7] = 216;
 
         let shrines = parse_shrines(&ovl).unwrap();
-        assert_eq!(shrines.len(), 3);
+        assert_eq!(shrines.len(), 7);
         assert_eq!(
             shrines[0],
             WorldLocation {
@@ -316,6 +331,14 @@ mod tests {
         );
         assert_eq!(
             shrines[2],
+            WorldLocation {
+                kind: WorldLabelKind::Shrine(Virtue::Valor),
+                x: 0,
+                y: 0,
+            }
+        );
+        assert_eq!(
+            shrines[6],
             WorldLocation {
                 kind: WorldLabelKind::Shrine(Virtue::Humility),
                 x: 231,
