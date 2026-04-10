@@ -64,6 +64,13 @@ enum GridSource {
     Overworld,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GridCacheKey {
+    center: (u8, u8),
+    zoom: usize,
+    source: GridSource,
+}
+
 /// Shared state accessed by both the UI thread (for updates) and the paint
 /// callback (for rendering). Protected by a mutex.
 struct GpuState {
@@ -83,9 +90,7 @@ pub struct MinimapState {
     zoom: usize,
     show_labels: bool,
     label_filters: LabelFilters,
-    last_center: Option<(u8, u8)>,
-    last_zoom: Option<usize>,
-    last_grid_source: Option<GridSource>,
+    last_grid_key: Option<GridCacheKey>,
 }
 
 impl Default for MinimapState {
@@ -104,9 +109,7 @@ impl Default for MinimapState {
             zoom: ZOOM_DEFAULT,
             show_labels: true,
             label_filters: LabelFilters::default(),
-            last_center: None,
-            last_zoom: None,
-            last_grid_source: None,
+            last_grid_key: None,
         }
     }
 }
@@ -120,9 +123,7 @@ impl MinimapState {
     pub fn clear(&mut self) {
         self.map = None;
         self.raw_atlas = None;
-        self.last_center = None;
-        self.last_zoom = None;
-        self.last_grid_source = None;
+        self.last_grid_key = None;
 
         let mut gpu = self.gpu.lock().unwrap();
         gpu.renderer = None;
@@ -160,35 +161,39 @@ pub fn show(
     };
     let is_overworld = map.location == LocationType::Overworld;
 
-    // Zoom controls + header row
-    ui.horizontal_wrapped(|ui| {
-        ui.label(&header);
-        ui.separator();
-        if ui.small_button("\u{2796}").clicked() {
-            state.zoom = (state.zoom * 4 / 3).min(ZOOM_MAX);
-        }
-        let mut zoom_f = state.zoom as f64;
-        let slider = egui::Slider::new(&mut zoom_f, ZOOM_MAX as f64..=ZOOM_MIN as f64)
-            .logarithmic(true)
-            .show_value(false)
-            .clamping(egui::SliderClamping::Always);
-        if ui.add(slider).changed() {
-            state.zoom = zoom_f as usize;
-        }
-        if ui.small_button("\u{2795}").clicked() {
-            state.zoom = (state.zoom * 3 / 4).max(ZOOM_MIN);
-        }
-        ui.label(format!("{}x{}", state.zoom, state.zoom));
-        if is_overworld && world_map.is_some() {
+    ui.vertical(|ui| {
+        // Keep zoom controls grouped with the header; label filters get their own row.
+        ui.horizontal_wrapped(|ui| {
+            ui.label(&header);
             ui.separator();
-            ui.checkbox(&mut state.show_labels, "Labels");
-            ui.add_enabled_ui(state.show_labels, |ui| {
-                ui.checkbox(&mut state.label_filters.towns, "Towns");
-                ui.checkbox(&mut state.label_filters.dwellings, "Dwellings");
-                ui.checkbox(&mut state.label_filters.castles, "Castles");
-                ui.checkbox(&mut state.label_filters.keeps, "Keeps");
-                ui.checkbox(&mut state.label_filters.dungeons, "Dungeons");
-                ui.checkbox(&mut state.label_filters.shrines, "Shrines");
+            if ui.small_button("\u{2796}").clicked() {
+                state.zoom = (state.zoom * 4 / 3).min(ZOOM_MAX);
+            }
+            let mut zoom_f = state.zoom as f64;
+            let slider = egui::Slider::new(&mut zoom_f, ZOOM_MAX as f64..=ZOOM_MIN as f64)
+                .logarithmic(true)
+                .show_value(false)
+                .clamping(egui::SliderClamping::Always);
+            if ui.add(slider).changed() {
+                state.zoom = zoom_f as usize;
+            }
+            if ui.small_button("\u{2795}").clicked() {
+                state.zoom = (state.zoom * 3 / 4).max(ZOOM_MIN);
+            }
+            ui.label(format!("{}x{}", state.zoom, state.zoom));
+        });
+
+        if is_overworld && world_map.is_some() {
+            ui.horizontal_wrapped(|ui| {
+                ui.checkbox(&mut state.show_labels, "Labels");
+                ui.add_enabled_ui(state.show_labels, |ui| {
+                    ui.checkbox(&mut state.label_filters.towns, "Towns");
+                    ui.checkbox(&mut state.label_filters.dwellings, "Dwellings");
+                    ui.checkbox(&mut state.label_filters.castles, "Castles");
+                    ui.checkbox(&mut state.label_filters.keeps, "Keeps");
+                    ui.checkbox(&mut state.label_filters.dungeons, "Dungeons");
+                    ui.checkbox(&mut state.label_filters.shrines, "Shrines");
+                });
             });
         }
     });
@@ -201,14 +206,16 @@ pub fn show(
     } else {
         GridSource::Local
     };
+    let grid_key = GridCacheKey {
+        center: (cx, cy),
+        zoom,
+        source: grid_source,
+    };
 
     // Prepare tile grid data on CPU when map state changes.
     // Object positions change every game turn, so always update when objects are present.
     let has_objects = !map.objects.is_empty();
-    let needs_update = state.last_center != Some((cx, cy))
-        || state.last_zoom != Some(zoom)
-        || state.last_grid_source != Some(grid_source)
-        || has_objects;
+    let needs_update = needs_grid_refresh(state.last_grid_key, grid_key, has_objects);
 
     if needs_update {
         let (grid_data, grid_w, grid_h, player_tile) =
@@ -233,9 +240,7 @@ pub fn show(
         gpu.player_tile = player_tile;
         gpu.grid_dirty = true;
 
-        state.last_center = Some((cx, cy));
-        state.last_zoom = Some(zoom);
-        state.last_grid_source = Some(grid_source);
+        state.last_grid_key = Some(grid_key);
     }
 
     // Allocate a centered square region for the minimap
@@ -472,6 +477,14 @@ fn visible_world_locations<'a>(
     visible
 }
 
+fn needs_grid_refresh(
+    last_grid_key: Option<GridCacheKey>,
+    grid_key: GridCacheKey,
+    has_objects: bool,
+) -> bool {
+    last_grid_key != Some(grid_key) || has_objects
+}
+
 fn world_label_rect(bounds: Rect, point: Pos2, label_size: egui::Vec2) -> Rect {
     let center = bounds.center();
     let mut min = Pos2::new(
@@ -575,8 +588,33 @@ mod tests {
     }
 
     #[test]
-    fn grid_source_distinguishes_local_and_overworld_textures() {
-        assert_ne!(GridSource::Local, GridSource::Overworld);
+    fn grid_source_change_invalidates_cached_grid() {
+        assert!(needs_grid_refresh(
+            Some(GridCacheKey {
+                center: (42, 43),
+                zoom: 32,
+                source: GridSource::Local,
+            }),
+            GridCacheKey {
+                center: (42, 43),
+                zoom: 32,
+                source: GridSource::Overworld,
+            },
+            false,
+        ));
+        assert!(!needs_grid_refresh(
+            Some(GridCacheKey {
+                center: (42, 43),
+                zoom: 32,
+                source: GridSource::Overworld,
+            }),
+            GridCacheKey {
+                center: (42, 43),
+                zoom: 32,
+                source: GridSource::Overworld,
+            },
+            false,
+        ));
     }
 
     #[test]
@@ -593,9 +631,11 @@ mod tests {
             tiles: [0; 1024],
             objects: Vec::new(),
         });
-        state.last_center = Some((1, 2));
-        state.last_zoom = Some(32);
-        state.last_grid_source = Some(GridSource::Overworld);
+        state.last_grid_key = Some(GridCacheKey {
+            center: (1, 2),
+            zoom: 32,
+            source: GridSource::Overworld,
+        });
         state.raw_atlas = Some(Arc::new(vec![1, 2, 3]));
 
         {
@@ -611,9 +651,7 @@ mod tests {
 
         assert!(state.map.is_none());
         assert!(state.raw_atlas.is_none());
-        assert!(state.last_center.is_none());
-        assert!(state.last_zoom.is_none());
-        assert!(state.last_grid_source.is_none());
+        assert!(state.last_grid_key.is_none());
 
         let gpu = state.gpu.lock().unwrap();
         // clear() must drop the GL-backed renderer so the next paint callback rebuilds it.
