@@ -773,7 +773,8 @@ mod tests {
 
         let atlas = rearrange_filtered_atlas(&sequential);
         let stride = FILTERED_ATLAS_WIDTH as usize * 4;
-        let row_start = FILTERED_ATLAS_PADDING as usize * stride + FILTERED_ATLAS_PADDING as usize * 4;
+        let row_start =
+            FILTERED_ATLAS_PADDING as usize * stride + FILTERED_ATLAS_PADDING as usize * 4;
 
         assert_eq!(&atlas[row_start..row_start + 4], [0, 0, 0, 0]);
         assert_eq!(&atlas[row_start + 4..row_start + 8], [40, 80, 160, 255]);
