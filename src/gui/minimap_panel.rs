@@ -59,16 +59,22 @@ struct OverworldOverlayOptions {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Distinguishes overworld rendering from 32x32 local map rendering.
 enum GridSource {
     Local,
     Overworld,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Cache identity for the current minimap grid contents.
+///
+/// Local maps need their own discriminator so switching towns or dungeon floors
+/// at the same coordinates still invalidates the cached terrain texture.
 struct GridCacheKey {
     center: (u8, u8),
     zoom: usize,
     source: GridSource,
+    local_map: Option<(LocationType, u8)>,
 }
 
 /// Shared state accessed by both the UI thread (for updates) and the paint
@@ -115,6 +121,7 @@ impl Default for MinimapState {
 }
 
 impl MinimapState {
+    /// Construct an empty minimap state with default zoom and label filters.
     pub fn new() -> Self {
         Self::default()
     }
@@ -135,6 +142,7 @@ impl MinimapState {
     }
 }
 
+/// Render the minimap controls and GL-backed map view for the current snapshot.
 pub fn show(
     ui: &mut egui::Ui,
     state: &mut MinimapState,
@@ -210,6 +218,7 @@ pub fn show(
         center: (cx, cy),
         zoom,
         source: grid_source,
+        local_map: (!is_overworld).then_some((map.location, map.z)),
     };
 
     // Prepare tile grid data on CPU when map state changes.
@@ -300,6 +309,7 @@ pub fn show(
     });
 }
 
+/// Render a placeholder when the tile atlas has not been loaded yet.
 pub fn show_no_atlas(ui: &mut egui::Ui, status: &str) {
     ui.centered_and_justified(|ui| {
         ui.label(status);
@@ -376,6 +386,7 @@ struct VisibleWorldLocation<'a> {
     distance_sq: i32,
 }
 
+/// Paint markers and optional labels for visible overworld points of interest.
 fn paint_overworld_overlay(
     ui: &egui::Ui,
     rect: Rect,
@@ -444,6 +455,7 @@ fn paint_overworld_overlay(
     }
 }
 
+/// Return the visible overworld locations after applying world-wrap projection.
 fn visible_world_locations<'a>(
     locations: &'a [WorldLocation],
     rect: Rect,
@@ -477,6 +489,7 @@ fn visible_world_locations<'a>(
     visible
 }
 
+/// Return whether the cached tile grid must be rebuilt for the current frame.
 fn needs_grid_refresh(
     last_grid_key: Option<GridCacheKey>,
     grid_key: GridCacheKey,
@@ -485,6 +498,7 @@ fn needs_grid_refresh(
     last_grid_key != Some(grid_key) || has_objects
 }
 
+/// Position a label near its marker while clamping it into the visible map area.
 fn world_label_rect(bounds: Rect, point: Pos2, label_size: egui::Vec2) -> Rect {
     let center = bounds.center();
     let mut min = Pos2::new(
@@ -505,6 +519,7 @@ fn world_label_rect(bounds: Rect, point: Pos2, label_size: egui::Vec2) -> Rect {
     Rect::from_min_size(min, label_size)
 }
 
+/// Compute the shortest wrapped delta on the 256x256 overworld map.
 fn wrapped_delta(coord: u8, center: u8) -> i16 {
     let mut delta = coord as i16 - center as i16;
     if delta > 127 {
@@ -515,6 +530,7 @@ fn wrapped_delta(coord: u8, center: u8) -> i16 {
     delta
 }
 
+/// Sort more important location categories ahead of less important ones.
 fn world_label_priority(category: WorldLabelCategory) -> u8 {
     match category {
         WorldLabelCategory::Shrine => 0,
@@ -525,6 +541,7 @@ fn world_label_priority(category: WorldLabelCategory) -> u8 {
     }
 }
 
+/// Pick a marker color for each overworld location category.
 fn world_marker_color(category: WorldLabelCategory) -> Color32 {
     match category {
         WorldLabelCategory::Town => Color32::from_rgb(240, 212, 106),
@@ -594,11 +611,13 @@ mod tests {
                 center: (42, 43),
                 zoom: 32,
                 source: GridSource::Local,
+                local_map: Some((LocationType::Town(1), 0)),
             }),
             GridCacheKey {
                 center: (42, 43),
                 zoom: 32,
                 source: GridSource::Overworld,
+                local_map: None,
             },
             false,
         ));
@@ -607,11 +626,47 @@ mod tests {
                 center: (42, 43),
                 zoom: 32,
                 source: GridSource::Overworld,
+                local_map: None,
             }),
             GridCacheKey {
                 center: (42, 43),
                 zoom: 32,
                 source: GridSource::Overworld,
+                local_map: None,
+            },
+            false,
+        ));
+    }
+
+    #[test]
+    fn local_map_change_invalidates_cached_grid() {
+        assert!(needs_grid_refresh(
+            Some(GridCacheKey {
+                center: (12, 9),
+                zoom: 32,
+                source: GridSource::Local,
+                local_map: Some((LocationType::Town(1), 0)),
+            }),
+            GridCacheKey {
+                center: (12, 9),
+                zoom: 32,
+                source: GridSource::Local,
+                local_map: Some((LocationType::Town(2), 0)),
+            },
+            false,
+        ));
+        assert!(needs_grid_refresh(
+            Some(GridCacheKey {
+                center: (12, 9),
+                zoom: 32,
+                source: GridSource::Local,
+                local_map: Some((LocationType::Dungeon(33), 0)),
+            }),
+            GridCacheKey {
+                center: (12, 9),
+                zoom: 32,
+                source: GridSource::Local,
+                local_map: Some((LocationType::Dungeon(33), 1)),
             },
             false,
         ));
@@ -635,6 +690,7 @@ mod tests {
             center: (1, 2),
             zoom: 32,
             source: GridSource::Overworld,
+            local_map: None,
         });
         state.raw_atlas = Some(Arc::new(vec![1, 2, 3]));
 
