@@ -125,6 +125,7 @@ impl MinimapState {
         self.last_grid_source = None;
 
         let mut gpu = self.gpu.lock().unwrap();
+        gpu.renderer = None;
         gpu.grid_dirty = false;
         gpu.grid_data.clear();
         gpu.objects_data.clear();
