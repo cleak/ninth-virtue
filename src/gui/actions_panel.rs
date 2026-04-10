@@ -26,6 +26,8 @@ pub fn show(
     inventory: &mut Inventory,
     frigates: &mut [Frigate],
     ctrl: &GameController,
+    enable_save_states: &mut bool,
+    show_save_warning: &mut bool,
     selected_slot: &mut usize,
     save_slots: &mut [Option<SlotInfo>],
     _status_msg: &mut String,
@@ -174,6 +176,24 @@ pub fn show(
                 .color(HEADING_COLOR),
         );
     });
+
+    // Enable/disable toggle — checkbox triggers warning dialog on first enable
+    let was_enabled = *enable_save_states;
+    ui.checkbox(enable_save_states, "Enable (experimental)");
+    if *enable_save_states && !was_enabled {
+        // User just checked the box — show warning, revert until confirmed
+        *enable_save_states = false;
+        *show_save_warning = true;
+    } else if !*enable_save_states && was_enabled {
+        // User unchecked — persist immediately
+        if let Some(dir) = ctrl.game_dir.as_deref() {
+            crate::game::save_state::save_settings(dir, false);
+        }
+    }
+
+    if !*enable_save_states {
+        return (wrote, action);
+    }
 
     let save_enabled = ctrl.is_ready() && ctrl.game_dir.is_some();
 

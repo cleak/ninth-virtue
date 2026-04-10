@@ -67,6 +67,28 @@ fn slot_path(game_dir: &Path, slot: usize) -> PathBuf {
     save_dir(game_dir).join(format!("slot_{slot}.nv5"))
 }
 
+fn settings_path(game_dir: &Path) -> PathBuf {
+    save_dir(game_dir).join("settings.json")
+}
+
+/// Load the "enable save states" setting from disk.  Returns false if
+/// the file doesn't exist, can't be read, or can't be parsed.
+pub fn load_settings(game_dir: &Path) -> bool {
+    let path = settings_path(game_dir);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    text.contains("\"enable_save_states\": true")
+}
+
+/// Persist the "enable save states" setting to disk.
+pub fn save_settings(game_dir: &Path, enable: bool) {
+    let dir = save_dir(game_dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let json = format!("{{\n  \"enable_save_states\": {enable}\n}}\n");
+    let _ = std::fs::write(settings_path(game_dir), json);
+}
+
 // ---------------------------------------------------------------------------
 // Header encode/decode
 // ---------------------------------------------------------------------------

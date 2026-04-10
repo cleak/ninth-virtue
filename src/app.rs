@@ -36,6 +36,8 @@ pub struct UltimaCompanion {
 
     selected_save_slot: usize,
     save_slots: Vec<Option<save_state::SlotInfo>>,
+    enable_save_states: bool,
+    show_save_state_warning: bool,
 
     memory_watch: MemoryWatch,
 
@@ -63,6 +65,8 @@ impl UltimaCompanion {
             status_msg: "Searching for DOSBox...".to_string(),
             selected_save_slot: 0,
             save_slots: vec![None; save_state::NUM_SLOTS],
+            enable_save_states: false,
+            show_save_state_warning: false,
             memory_watch: MemoryWatch::default(),
             audio_session: None,
             audio_volume: 1.0,
@@ -110,6 +114,7 @@ impl UltimaCompanion {
                 }
                 if let Some(dir) = self.ctrl.game_dir.as_ref() {
                     self.save_slots = save_state::list_slots(dir);
+                    self.enable_save_states = save_state::load_settings(dir);
                 }
                 self.try_acquire_audio(pid);
                 if self.ctrl.game_confirmed() {
@@ -295,6 +300,8 @@ impl eframe::App for UltimaCompanion {
             minimap,
             selected_save_slot,
             save_slots,
+            enable_save_states,
+            show_save_state_warning,
             status_msg,
             memory_watch,
             audio_session,
@@ -304,6 +311,34 @@ impl eframe::App for UltimaCompanion {
         } = self;
 
         gui::memory_watch_panel::show_with_ctrl(ctx, memory_watch, ctrl);
+
+        // --- Save state warning dialog ---
+        if *show_save_state_warning {
+            egui::Window::new("Enable Save States?")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(
+                        "Save states are experimental. They may cause \
+                         visual glitches, stuck music, or corrupted game \
+                         state. Use at your own risk.",
+                    );
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Enable").clicked() {
+                            *enable_save_states = true;
+                            *show_save_state_warning = false;
+                            if let Some(dir) = ctrl.game_dir.as_deref() {
+                                save_state::save_settings(dir, true);
+                            }
+                        }
+                        if ui.button("Cancel").clicked() {
+                            *show_save_state_warning = false;
+                        }
+                    });
+                });
+        }
 
         egui::TopBottomPanel::bottom("minimap")
             .min_height(300.0)
@@ -352,6 +387,8 @@ impl eframe::App for UltimaCompanion {
                         inventory,
                         frigates,
                         ctrl,
+                        enable_save_states,
+                        show_save_state_warning,
                         selected_save_slot,
                         save_slots,
                         status_msg,
