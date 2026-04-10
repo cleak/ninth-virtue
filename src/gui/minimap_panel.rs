@@ -49,6 +49,15 @@ impl LabelFilters {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct OverworldOverlayOptions {
+    cx: u8,
+    cy: u8,
+    zoom: usize,
+    show_labels: bool,
+    label_filters: LabelFilters,
+}
+
 /// Shared state accessed by both the UI thread (for updates) and the paint
 /// callback (for rendering). Protected by a mutex.
 struct GpuState {
@@ -241,16 +250,14 @@ pub fn show(
         });
 
         if let Some(wm) = world_map.filter(|_| is_overworld) {
-            paint_overworld_overlay(
-                ui,
-                rect,
-                wm,
+            let overlay = OverworldOverlayOptions {
                 cx,
                 cy,
                 zoom,
-                state.show_labels,
-                state.label_filters,
-            );
+                show_labels: state.show_labels,
+                label_filters: state.label_filters,
+            };
+            paint_overworld_overlay(ui, rect, wm, overlay);
         }
     });
 }
@@ -335,13 +342,15 @@ fn paint_overworld_overlay(
     ui: &egui::Ui,
     rect: Rect,
     world_map: &WorldMap,
-    cx: u8,
-    cy: u8,
-    zoom: usize,
-    show_labels: bool,
-    label_filters: LabelFilters,
+    overlay: OverworldOverlayOptions,
 ) {
-    let mut visible = visible_world_locations(world_map.locations(), rect, cx, cy, zoom);
+    let mut visible = visible_world_locations(
+        world_map.locations(),
+        rect,
+        overlay.cx,
+        overlay.cy,
+        overlay.zoom,
+    );
     if visible.is_empty() {
         return;
     }
@@ -361,11 +370,11 @@ fn paint_overworld_overlay(
         painter.circle_stroke(entry.point, 4.5, Stroke::new(1.0, Color32::BLACK));
     }
 
-    if !show_labels {
+    if !overlay.show_labels {
         return;
     }
 
-    let font_size = match zoom {
+    let font_size = match overlay.zoom {
         0..=48 => 12.0,
         49..=96 => 11.0,
         _ => 10.0,
@@ -374,7 +383,7 @@ fn paint_overworld_overlay(
     let mut occupied = Vec::new();
 
     for entry in &visible {
-        if !label_filters.shows(entry.location.category()) {
+        if !overlay.label_filters.shows(entry.location.category()) {
             continue;
         }
         let text = entry.location.name();
