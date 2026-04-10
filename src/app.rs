@@ -478,6 +478,8 @@ impl eframe::App for UltimaCompanion {
         // --- Party, inventory, actions ---
         let mut game_written = false;
 
+        // Let the dashboard keep its natural content height so the minimap
+        // can take the rest of the window.
         egui::TopBottomPanel::top("dashboard").show(ctx, |ui| {
             gui::section_frame(ui).show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
@@ -519,8 +521,9 @@ impl eframe::App for UltimaCompanion {
                     // Only show load errors when actually attached to a process
                     let status = match game_dir {
                         Some(dir) => format!("Tiles not found in {}", dir.display()),
-                        None => "Game directory not found - could not locate DOSBox config"
-                            .to_string(),
+                        None => {
+                            "Game directory not found - could not locate DOSBox config".to_string()
+                        }
                     };
                     gui::minimap_panel::show_no_atlas(ui, &status);
                 }
