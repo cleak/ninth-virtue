@@ -409,9 +409,10 @@ fn build_objects_overlay(
 
 /// Collapse each atlas tile to a representative color for overview rendering.
 ///
-/// Animated-page tiles (256-511) are used as transparent overlays, so black
-/// pixels should not contribute to their average color and instead reduce
-/// alpha coverage.
+/// Palette-0 black in the Ultima V art is mostly outline/shadow detail. Ignore
+/// it while building zoomed-out colors so repeated pixel-art patterns do not
+/// darken the minimap during minification. Animated-page tiles (256-511) also
+/// use the surviving pixel coverage as overlay alpha.
 fn build_tile_lowpass_lut(atlas_rgba: &[u8]) -> Vec<LowpassTileSample> {
     assert_eq!(
         atlas_rgba.len(),
@@ -427,7 +428,7 @@ fn build_tile_lowpass_lut(atlas_rgba: &[u8]) -> Vec<LowpassTileSample> {
         let mut opaque_pixels = 0u32;
 
         for px in tile.chunks_exact(4) {
-            let visible = !overlay_tile || px[0] != 0 || px[1] != 0 || px[2] != 0;
+            let visible = px[0] != 0 || px[1] != 0 || px[2] != 0;
             if !visible {
                 continue;
             }
@@ -887,6 +888,28 @@ mod tests {
             LowpassTileSample {
                 rgb: [200, 100, 50],
                 alpha: 128
+            }
+        );
+    }
+
+    #[test]
+    fn lowpass_lut_ignores_black_for_terrain_tiles() {
+        let mut atlas = vec![0u8; TILE_COUNT * TILE_RGBA_BYTES];
+        let terrain = &mut atlas[0..TILE_RGBA_BYTES];
+        for (idx, px) in terrain.chunks_exact_mut(4).enumerate() {
+            if idx % 2 == 0 {
+                px.copy_from_slice(&[0, 0, 0, 255]);
+            } else {
+                px.copy_from_slice(&[80, 120, 200, 255]);
+            }
+        }
+
+        let lut = build_tile_lowpass_lut(&atlas);
+        assert_eq!(
+            lut[0],
+            LowpassTileSample {
+                rgb: [80, 120, 200],
+                alpha: 255
             }
         );
     }

@@ -8,9 +8,9 @@ const ATLAS_ROWS: u32 = (TILE_COUNT as u32).div_ceil(ATLAS_COLS);
 const ATLAS_WIDTH: u32 = ATLAS_COLS * TILE_SIZE as u32;
 const ATLAS_HEIGHT: u32 = ATLAS_ROWS * TILE_SIZE as u32;
 
-/// Filtered atlas layout: each tile gets a 1px gutter so mipmaps can low-pass
-/// inside a tile without bleeding into the neighboring tile.
-const FILTERED_ATLAS_PADDING: u32 = 1;
+/// Filtered atlas layout: each tile gets a half-tile gutter so generated mip
+/// levels stay tile-local all the way down to a 1x1 sample.
+const FILTERED_ATLAS_PADDING: u32 = TILE_SIZE as u32 / 2;
 const FILTERED_ATLAS_CELL_SIZE: u32 = TILE_SIZE as u32 + FILTERED_ATLAS_PADDING * 2;
 const FILTERED_ATLAS_WIDTH: u32 = ATLAS_COLS * FILTERED_ATLAS_CELL_SIZE;
 const FILTERED_ATLAS_HEIGHT: u32 = ATLAS_ROWS * FILTERED_ATLAS_CELL_SIZE;
@@ -69,6 +69,22 @@ vec2 filtered_atlas_grad(vec2 tile_coord_grad) {
     return tile_coord_grad * (TILE_SIZE_PX - 1.0) / u_filtered_atlas_size;
 }
 
+vec4 filtered_tile_color(float tile_id, vec2 tile_frac, vec2 grad_x, vec2 grad_y) {
+    vec4 filtered = textureGrad(
+        u_filtered_atlas,
+        filtered_atlas_uv_for_tile(tile_id, tile_frac),
+        grad_x,
+        grad_y
+    );
+    if (filtered.a <= 0.0001) {
+        return vec4(0.0, 0.0, 0.0, 1.0);
+    }
+    // The filtered atlas encodes palette-0 black as transparent coverage so
+    // minification averages only visible texels. Convert back to an opaque
+    // representative color for terrain rendering.
+    return vec4(filtered.rgb / filtered.a, 1.0);
+}
+
 void main() {
     vec2 tile_coord = v_uv * u_grid_size;
     vec2 tile_idx = floor(tile_coord);
@@ -84,12 +100,7 @@ void main() {
     vec2 filtered_grad_y = filtered_atlas_grad(dFdy(tile_coord));
 
     vec4 detailed_color = texture(u_atlas, atlas_uv_for_tile(tile_id, tile_frac));
-    vec4 filtered_color = textureGrad(
-        u_filtered_atlas,
-        filtered_atlas_uv_for_tile(tile_id, tile_frac),
-        filtered_grad_x,
-        filtered_grad_y
-    );
+    vec4 filtered_color = filtered_tile_color(tile_id, tile_frac, filtered_grad_x, filtered_grad_y);
 
     // Object overlay: if an object tile is present, render its sprite on top.
     // Object tile bytes are 0-255 in the R8 texture; the actual atlas sprite
@@ -108,24 +119,26 @@ void main() {
             filtered_grad_x,
             filtered_grad_y
         );
-        // Object texels in the filtered atlas are encoded as transparent black
-        // or opaque RGB, so minification already produces premultiplied color.
+        // Object texels in the filtered atlas are encoded as premultiplied RGB
+        // with palette-0 black treated as transparent coverage.
         filtered_color = vec4(
             filtered_color.rgb * (1.0 - obj_filtered.a) + obj_filtered.rgb,
             1.0
         );
     }
 
-    // Use the original nearest atlas while tiles are large on screen, then
-    // blend to the mipmapped atlas once 16x16 tile art is actually minified.
+    // Drive the overview transitions from source texel density rather than
+    // tile size alone. Repetitive 16x16 EGA patterns can alias badly while a
+    // tile is still several screen pixels wide.
     float tiles_per_pixel = max(fwidth(tile_coord).x, fwidth(tile_coord).y);
-    float filtered_mix = smoothstep(0.20, 0.45, tiles_per_pixel);
+    float atlas_texels_per_pixel = tiles_per_pixel * TILE_SIZE_PX;
+    float filtered_mix = smoothstep(1.0, 2.25, atlas_texels_per_pixel);
     vec4 atlas_color = mix(detailed_color, filtered_color, filtered_mix);
 
-    // Once a tile itself is near or below one screen pixel, atlas mipmaps are
-    // no longer enough; blend to the whole-tile low-pass map to avoid
-    // cross-tile moire.
-    float lowpass_mix = smoothstep(0.85, 1.25, tiles_per_pixel);
+    // Once several source texels map to one screen pixel, even tile-safe
+    // mipmaps keep too much intra-tile detail. Blend to the per-tile low-pass
+    // overview before the map reaches 1 screen pixel per tile.
+    float lowpass_mix = smoothstep(2.5, 4.5, atlas_texels_per_pixel);
     vec2 lowpass_uv = clamp(v_uv, 0.5 / u_grid_size, 1.0 - 0.5 / u_grid_size);
     frag_color = mix(atlas_color, texture(u_lowpass, lowpass_uv), lowpass_mix);
 
@@ -607,27 +620,21 @@ fn rearrange_filtered_atlas(sequential_rgba: &[u8]) -> Vec<u8> {
             let dst_y = cell_y + FILTERED_ATLAS_PADDING as usize + py;
             let dst_x = cell_x + FILTERED_ATLAS_PADDING as usize;
             let dst_off = dst_y * stride + dst_x * 4;
-            let row_bytes = TILE_SIZE * 4; // 64 bytes per tile row
-            if tile_id >= 256 {
-                for px in 0..TILE_SIZE {
-                    let src_px = src_off + px * 4;
-                    let dst_px = dst_off + px * 4;
-                    let rgba = &sequential_rgba[src_px..src_px + 4];
-                    // Object sprites use black as transparent. Keep that as
-                    // transparent black so linear and mip filtering produce
-                    // coverage-weighted (premultiplied) RGB at the edges.
-                    buf[dst_px] = rgba[0];
-                    buf[dst_px + 1] = rgba[1];
-                    buf[dst_px + 2] = rgba[2];
-                    buf[dst_px + 3] = if rgba[0] == 0 && rgba[1] == 0 && rgba[2] == 0 {
-                        0
-                    } else {
-                        255
-                    };
-                }
-            } else {
-                buf[dst_off..dst_off + row_bytes]
-                    .copy_from_slice(&sequential_rgba[src_off..src_off + row_bytes]);
+            for px in 0..TILE_SIZE {
+                let src_px = src_off + px * 4;
+                let dst_px = dst_off + px * 4;
+                let rgba = &sequential_rgba[src_px..src_px + 4];
+                // Treat palette-0 black as coverage-free in the zoomed-out
+                // filtered atlas so generated mip levels average only visible
+                // texels instead of darkening toward black.
+                buf[dst_px] = rgba[0];
+                buf[dst_px + 1] = rgba[1];
+                buf[dst_px + 2] = rgba[2];
+                buf[dst_px + 3] = if rgba[0] == 0 && rgba[1] == 0 && rgba[2] == 0 {
+                    0
+                } else {
+                    255
+                };
             }
         }
 
@@ -756,5 +763,19 @@ mod tests {
 
         assert_eq!(&atlas[row_start..row_start + 4], [0, 0, 0, 0]);
         assert_eq!(&atlas[row_start + 4..row_start + 8], [200, 100, 50, 255]);
+    }
+
+    #[test]
+    fn filtered_atlas_marks_black_terrain_pixels_transparent() {
+        let mut sequential = vec![0u8; TILE_COUNT * TILE_SIZE * TILE_SIZE * 4];
+        sequential[0..4].copy_from_slice(&[0, 0, 0, 255]);
+        sequential[4..8].copy_from_slice(&[40, 80, 160, 255]);
+
+        let atlas = rearrange_filtered_atlas(&sequential);
+        let stride = FILTERED_ATLAS_WIDTH as usize * 4;
+        let row_start = FILTERED_ATLAS_PADDING as usize * stride + FILTERED_ATLAS_PADDING as usize * 4;
+
+        assert_eq!(&atlas[row_start..row_start + 4], [0, 0, 0, 0]);
+        assert_eq!(&atlas[row_start + 4..row_start + 8], [40, 80, 160, 255]);
     }
 }
