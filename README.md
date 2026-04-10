@@ -18,20 +18,24 @@ This is not a ROM hack, not a save-file editor, and not a replacement engine. It
 - Renders an experimental live minimap from in-memory tile and object data
 - Includes debugging tools for memory watching and reverse-engineering work
 
+## Screenshot
+
+![The Ninth Virtue main window showing party status, quick actions, shrine progress, and the overworld minimap](images/main-window.png)
+
+Main window attached to a live Ultima V session, showing the party panel, quick recovery controls, shrine quest tracker, and overworld minimap.
+
 ## Scope And Disclaimers
 
 - `ninth-virtue` is an unofficial fan project. It is not affiliated with or endorsed by the rights holders of Ultima, DOSBox, or DOSBox Staging.
-- You must supply your own legally obtained copy of Ultima V and your own emulator setup. This repository does not include game data, ROMs, copyrighted art, or other proprietary Ultima V assets.
+- You must supply your own legally obtained copy of Ultima V and your own emulator setup. This repository does not include game data, ROMs, or extracted Ultima V asset files. The bundled screenshot is documentation for the companion UI, not a redistributable game data set.
 - The app reads and writes another local process's memory. Use it at your own risk, and keep backups of your saves before relying on live edits.
 - This is a single-player quality-of-life and reverse-engineering tool. It is not intended as an anti-cheat bypass, multiplayer tool, or general-purpose memory editor.
 
 ## Why This Exists
 
-Ultima V is brilliant, but it was never designed to have an observer's dashboard. `ninth-virtue` treats the running game as the source of truth and builds a companion UI around it. The result is closer to a cockpit than a cheat menu: you can inspect the party at a glance, see the shape of the world, understand shrine progression, and intervene quickly without digging through hex dumps or restarting the session.
+Ultima V is brilliant, but it was never designed to have an observer's dashboard. `ninth-virtue` treats the running game as the source of truth and builds a companion UI around it. The result is closer to a cockpit than a cheat menu: you can inspect the party at a glance, see the shape of the world, understand shrine progression, and intervene quickly with quality of life improvements like curing poison.
 
-For players, it is a quality-of-life layer.
-
-For reverse engineers, it is a concrete example of process attachment, emulator memory scanning, and live state extraction from a classic DOS game.
+For reverse engineers, it is also a concrete example of process attachment, emulator memory scanning, and live state extraction from a classic DOS game.
 
 ## Requirements
 
@@ -52,7 +56,7 @@ Typical workflow:
 
 1. Launch DOSBox or DOSBox Staging with Ultima V.
 2. Load into the game.
-3. Start `ninth-virtue`.
+3. Start `ninth-virtue` (you can also run `ninth-virtue` first if you'd rather).
 4. If only one DOSBox process is available, the app will try to attach automatically.
 5. If multiple processes are present, select the right one from the connection bar.
 
