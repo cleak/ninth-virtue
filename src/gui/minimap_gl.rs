@@ -41,7 +41,6 @@ uniform float u_atlas_rows;
 uniform vec2 u_filtered_atlas_size;
 uniform float u_filtered_atlas_cell_size;
 uniform float u_filtered_atlas_padding;
-uniform vec2 u_player_tile;
 
 const float TILE_SIZE_PX = 16.0;
 const float FILTERED_TILE_COLOR_ALPHA_EPSILON = 0.0001;
@@ -156,36 +155,6 @@ void main() {
     vec2 lowpass_uv = clamp(v_uv, 0.5 / u_grid_size, 1.0 - 0.5 / u_grid_size);
     frag_color = mix(atlas_color, texture(u_lowpass, lowpass_uv), lowpass_mix);
 
-    // Player marker overlay (snap to tile boundary for odd zoom values)
-    vec2 marker_tile = floor(u_player_tile);
-    vec2 marker_min = marker_tile / u_grid_size;
-    vec2 marker_max = (marker_tile + 1.0) / u_grid_size;
-
-    if (v_uv.x >= marker_min.x && v_uv.x < marker_max.x &&
-        v_uv.y >= marker_min.y && v_uv.y < marker_max.y) {
-
-        // Local position within the marker tile [0, 1]
-        vec2 local = (v_uv - marker_min) / (marker_max - marker_min);
-
-        // Yellow border (2 pixels out of 16)
-        float border = 2.0 / 16.0;
-        bool on_border = local.x < border || local.x > (1.0 - border) ||
-                         local.y < border || local.y > (1.0 - border);
-
-        // Red cross (center, 4 pixels in each direction)
-        float cross_half = 4.0 / 16.0;
-        float pixel = 1.0 / 16.0;
-        float cx = abs(local.x - 0.5);
-        float cy = abs(local.y - 0.5);
-        bool on_cross = (cx < pixel && cy < cross_half) ||
-                        (cy < pixel && cx < cross_half);
-
-        if (on_cross) {
-            frag_color = vec4(1.0, 0.0, 0.0, 1.0);
-        } else if (on_border) {
-            frag_color = vec4(1.0, 1.0, 0.0, 1.0);
-        }
-    }
 }
 "#;
 
@@ -219,7 +188,6 @@ pub struct MinimapGl {
     u_filtered_atlas_size: glow::UniformLocation,
     u_filtered_atlas_cell_size: glow::UniformLocation,
     u_filtered_atlas_padding: glow::UniformLocation,
-    u_player_tile: glow::UniformLocation,
 }
 
 impl MinimapGl {
@@ -243,7 +211,6 @@ impl MinimapGl {
             let u_filtered_atlas_padding = gl
                 .get_uniform_location(program, "u_filtered_atlas_padding")
                 .unwrap();
-            let u_player_tile = gl.get_uniform_location(program, "u_player_tile").unwrap();
 
             // Set texture unit bindings (these are constant)
             gl.use_program(Some(program));
@@ -357,7 +324,6 @@ impl MinimapGl {
                 u_filtered_atlas_size,
                 u_filtered_atlas_cell_size,
                 u_filtered_atlas_padding,
-                u_player_tile,
             }
         }
     }
@@ -379,13 +345,7 @@ impl MinimapGl {
     }
 
     /// Render the tilemap into the given viewport.
-    pub fn paint(
-        &self,
-        gl: &glow::Context,
-        info: &egui::PaintCallbackInfo,
-        grid_size: [f32; 2],
-        player_tile: [f32; 2],
-    ) {
+    pub fn paint(&self, gl: &glow::Context, info: &egui::PaintCallbackInfo, grid_size: [f32; 2]) {
         let vp = info.viewport_in_pixels();
         let clip = info.clip_rect_in_pixels();
 
@@ -430,7 +390,6 @@ impl MinimapGl {
                 Some(&self.u_filtered_atlas_padding),
                 FILTERED_ATLAS_PADDING as f32,
             );
-            gl.uniform_2_f32(Some(&self.u_player_tile), player_tile[0], player_tile[1]);
 
             // Draw fullscreen quad
             gl.bind_vertex_array(Some(self.vao));

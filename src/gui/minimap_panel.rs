@@ -14,6 +14,16 @@ const ZOOM_MIN: usize = 11;
 const ZOOM_MAX: usize = 256;
 const ZOOM_DEFAULT: usize = 48;
 const TILE_RGBA_BYTES: usize = TILE_SIZE * TILE_SIZE * 4;
+const PLAYER_MARKER_MIN_RADIUS: f32 = 4.0;
+const PLAYER_MARKER_TILE_MARGIN_PX: f32 = 3.0;
+const PLAYER_MARKER_FILL_TILE_THRESHOLD_PX: f32 = 6.0;
+const PLAYER_MARKER_COLOR: Color32 = Color32::from_rgb(255, 230, 128);
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PlayerMarkerStyle {
+    radius: f32,
+    filled: bool,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct LowpassTileSample {
@@ -313,11 +323,7 @@ pub fn show(
             }
 
             let grid_size = [gpu.grid_dims.0 as f32, gpu.grid_dims.1 as f32];
-            let player_tile = gpu.player_tile;
-            gpu.renderer
-                .as_ref()
-                .unwrap()
-                .paint(gl, &info, grid_size, player_tile);
+            gpu.renderer.as_ref().unwrap().paint(gl, &info, grid_size);
         });
 
         ui.painter().add(egui::PaintCallback {
@@ -335,6 +341,12 @@ pub fn show(
             };
             paint_overworld_overlay(ui, rect, wm, overlay);
         }
+
+        let (grid_dims, player_tile) = {
+            let gpu = state.gpu.lock().unwrap();
+            (gpu.grid_dims, gpu.player_tile)
+        };
+        paint_player_marker(ui, rect, grid_dims, player_tile);
     });
 }
 
@@ -592,6 +604,48 @@ fn paint_overworld_overlay(
     }
 }
 
+/// Paint the current player location with a screen-space marker that remains
+/// readable even when the visible map contains hundreds of tiles.
+fn paint_player_marker(ui: &egui::Ui, rect: Rect, grid_dims: (u32, u32), player_tile: [f32; 2]) {
+    if grid_dims.0 == 0 || grid_dims.1 == 0 {
+        return;
+    }
+
+    let center = player_marker_center(rect, grid_dims, player_tile);
+    let tile_span_px = (rect.width() / grid_dims.0 as f32).min(rect.height() / grid_dims.1 as f32);
+    let style = player_marker_style(tile_span_px);
+    let painter = ui.painter_at(rect);
+
+    if style.filled {
+        painter.circle_filled(center, style.radius, PLAYER_MARKER_COLOR);
+        painter.circle_stroke(center, style.radius + 0.5, Stroke::new(1.5, Color32::BLACK));
+    } else {
+        painter.circle_stroke(center, style.radius + 0.5, Stroke::new(3.0, Color32::BLACK));
+        painter.circle_stroke(center, style.radius, Stroke::new(1.75, PLAYER_MARKER_COLOR));
+    }
+}
+
+/// Map a tile-space player position to the pixel center of the corresponding
+/// tile in the minimap rectangle.
+fn player_marker_center(rect: Rect, grid_dims: (u32, u32), player_tile: [f32; 2]) -> Pos2 {
+    let tile_x = player_tile[0].floor();
+    let tile_y = player_tile[1].floor();
+    Pos2::new(
+        rect.left() + (tile_x + 0.5) / grid_dims.0 as f32 * rect.width(),
+        rect.top() + (tile_y + 0.5) / grid_dims.1 as f32 * rect.height(),
+    )
+}
+
+/// Pick a marker size that mostly stays fixed on screen while still growing a
+/// bit at close zoom, then switch to a solid dot once tiles are too small to
+/// preserve an obvious hollow center.
+fn player_marker_style(tile_span_px: f32) -> PlayerMarkerStyle {
+    PlayerMarkerStyle {
+        radius: (tile_span_px * 0.5 - PLAYER_MARKER_TILE_MARGIN_PX).max(PLAYER_MARKER_MIN_RADIUS),
+        filled: tile_span_px <= PLAYER_MARKER_FILL_TILE_THRESHOLD_PX,
+    }
+}
+
 /// Return the visible overworld locations after applying world-wrap projection.
 fn visible_world_locations<'a>(
     locations: &'a [WorldLocation],
@@ -716,6 +770,35 @@ mod tests {
         assert_eq!(visible.len(), 1);
         assert!(visible[0].point.x > rect.center().x);
         assert!((visible[0].point.y - rect.center().y).abs() <= rect.height() / 16.0);
+    }
+
+    #[test]
+    fn player_marker_turns_filled_once_tiles_get_too_small() {
+        assert!(!player_marker_style(8.0).filled);
+        assert!(player_marker_style(6.0).filled);
+        assert!(player_marker_style(2.0).filled);
+    }
+
+    #[test]
+    fn player_marker_radius_is_clamped_across_zoom_levels() {
+        assert_eq!(player_marker_style(1.0).radius, PLAYER_MARKER_MIN_RADIUS);
+        assert_eq!(player_marker_style(32.0).radius, 13.0);
+    }
+
+    #[test]
+    fn player_marker_center_tracks_tile_center() {
+        let rect = Rect::from_min_size(Pos2::new(10.0, 20.0), vec2(320.0, 320.0));
+        let point = player_marker_center(rect, (32, 32), [5.0, 6.0]);
+
+        assert_eq!(point, Pos2::new(65.0, 85.0));
+    }
+
+    #[test]
+    fn player_marker_center_matches_odd_zoom_tile_snap() {
+        let rect = Rect::from_min_size(Pos2::new(0.0, 0.0), vec2(110.0, 110.0));
+        let point = player_marker_center(rect, (11, 11), [5.5, 5.5]);
+
+        assert_eq!(point, Pos2::new(55.0, 55.0));
     }
 
     #[test]
