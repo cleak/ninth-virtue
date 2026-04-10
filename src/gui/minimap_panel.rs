@@ -5,13 +5,20 @@ use egui::{Color32, FontId, Pos2, Rect, Stroke, vec2};
 
 use crate::game::map::{LocationType, MapState, ObjectEntry};
 use crate::game::world_map::{WorldLabelCategory, WorldLocation, WorldMap};
-use crate::tiles::atlas::TileAtlas;
+use crate::tiles::atlas::{TILE_COUNT, TILE_SIZE, TileAtlas};
 
 use super::minimap_gl::MinimapGl;
 
 const ZOOM_MIN: usize = 11;
 const ZOOM_MAX: usize = 256;
 const ZOOM_DEFAULT: usize = 48;
+const TILE_RGBA_BYTES: usize = TILE_SIZE * TILE_SIZE * 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LowpassTileSample {
+    rgb: [u8; 3],
+    alpha: u8,
+}
 
 #[derive(Debug, Clone, Copy)]
 struct LabelFilters {
@@ -84,6 +91,7 @@ struct GpuState {
     grid_dirty: bool,
     grid_data: Vec<u8>,
     objects_data: Vec<u8>,
+    lowpass_data: Vec<u8>,
     grid_dims: (u32, u32),
     player_tile: [f32; 2],
 }
@@ -93,6 +101,7 @@ pub struct MinimapState {
     gpu: Arc<Mutex<GpuState>>,
     /// Raw sequential atlas RGBA, captured once from TileAtlas for lazy GPU upload.
     raw_atlas: Option<Arc<Vec<u8>>>,
+    tile_lowpass_lut: Option<Vec<LowpassTileSample>>,
     zoom: usize,
     show_labels: bool,
     label_filters: LabelFilters,
@@ -108,10 +117,12 @@ impl Default for MinimapState {
                 grid_dirty: false,
                 grid_data: Vec::new(),
                 objects_data: Vec::new(),
+                lowpass_data: Vec::new(),
                 grid_dims: (0, 0),
                 player_tile: [0.0, 0.0],
             })),
             raw_atlas: None,
+            tile_lowpass_lut: None,
             zoom: ZOOM_DEFAULT,
             show_labels: true,
             label_filters: LabelFilters::default(),
@@ -130,6 +141,7 @@ impl MinimapState {
     pub fn clear(&mut self) {
         self.map = None;
         self.raw_atlas = None;
+        self.tile_lowpass_lut = None;
         self.last_grid_key = None;
 
         let mut gpu = self.gpu.lock().unwrap();
@@ -137,6 +149,7 @@ impl MinimapState {
         gpu.grid_dirty = false;
         gpu.grid_data.clear();
         gpu.objects_data.clear();
+        gpu.lowpass_data.clear();
         gpu.grid_dims = (0, 0);
         gpu.player_tile = [0.0, 0.0];
     }
@@ -159,6 +172,12 @@ pub fn show(
     // Capture raw atlas data once for lazy GPU upload
     if state.raw_atlas.is_none() {
         state.raw_atlas = Some(Arc::new(atlas.raw_data().to_vec()));
+    }
+    if state.tile_lowpass_lut.is_none() {
+        state.tile_lowpass_lut = state
+            .raw_atlas
+            .as_ref()
+            .map(|raw_atlas| build_tile_lowpass_lut(raw_atlas.as_slice()));
     }
 
     // Header
@@ -241,10 +260,18 @@ pub fn show(
 
         let objects_data =
             build_objects_overlay(&map.objects, grid_w as usize, grid_h as usize, map);
+        let lowpass_data = build_lowpass_map(
+            &grid_data,
+            &objects_data,
+            state.tile_lowpass_lut.as_ref().unwrap(),
+            grid_w as usize,
+            grid_h as usize,
+        );
 
         let mut gpu = state.gpu.lock().unwrap();
         gpu.grid_data = grid_data;
         gpu.objects_data = objects_data;
+        gpu.lowpass_data = lowpass_data;
         gpu.grid_dims = (grid_w, grid_h);
         gpu.player_tile = player_tile;
         gpu.grid_dirty = true;
@@ -280,6 +307,7 @@ pub fn show(
                 let renderer = gpu.renderer.as_ref().unwrap();
                 renderer.update_grid(gl, &gpu.grid_data, gpu.grid_dims.0, gpu.grid_dims.1);
                 renderer.update_objects(gl, &gpu.objects_data, gpu.grid_dims.0, gpu.grid_dims.1);
+                renderer.update_lowpass(gl, &gpu.lowpass_data, gpu.grid_dims.0, gpu.grid_dims.1);
                 gpu.grid_dirty = false;
             }
 
@@ -377,6 +405,113 @@ fn build_objects_overlay(
     }
 
     overlay
+}
+
+/// Collapse each atlas tile to a representative color for overview rendering.
+///
+/// Animated-page tiles (256-511) are used as transparent overlays, so black
+/// pixels should not contribute to their average color and instead reduce
+/// alpha coverage.
+fn build_tile_lowpass_lut(atlas_rgba: &[u8]) -> Vec<LowpassTileSample> {
+    assert_eq!(
+        atlas_rgba.len(),
+        TILE_COUNT * TILE_RGBA_BYTES,
+        "tile low-pass LUT requires one 16x16 RGBA tile for each atlas entry"
+    );
+
+    let mut lut = Vec::with_capacity(TILE_COUNT);
+    for tile_idx in 0..TILE_COUNT {
+        let tile = &atlas_rgba[tile_idx * TILE_RGBA_BYTES..(tile_idx + 1) * TILE_RGBA_BYTES];
+        let overlay_tile = tile_idx >= 256;
+        let mut sum = [0u32; 3];
+        let mut opaque_pixels = 0u32;
+
+        for px in tile.chunks_exact(4) {
+            let visible = !overlay_tile || px[0] != 0 || px[1] != 0 || px[2] != 0;
+            if !visible {
+                continue;
+            }
+            sum[0] += px[0] as u32;
+            sum[1] += px[1] as u32;
+            sum[2] += px[2] as u32;
+            opaque_pixels += 1;
+        }
+
+        let alpha = if overlay_tile {
+            ((opaque_pixels * 255 + (TILE_SIZE * TILE_SIZE / 2) as u32)
+                / (TILE_SIZE * TILE_SIZE) as u32) as u8
+        } else {
+            u8::MAX
+        };
+
+        let rgb = if opaque_pixels == 0 {
+            [0, 0, 0]
+        } else {
+            [
+                (sum[0] / opaque_pixels) as u8,
+                (sum[1] / opaque_pixels) as u8,
+                (sum[2] / opaque_pixels) as u8,
+            ]
+        };
+
+        lut.push(LowpassTileSample { rgb, alpha });
+    }
+
+    lut
+}
+
+/// Build an RGBA low-pass map that stays stable when multiple tiles collapse
+/// into a single screen pixel.
+fn build_lowpass_map(
+    grid_data: &[u8],
+    objects_data: &[u8],
+    tile_lut: &[LowpassTileSample],
+    grid_w: usize,
+    grid_h: usize,
+) -> Vec<u8> {
+    let texels = grid_w * grid_h;
+    assert_eq!(
+        grid_data.len(),
+        texels,
+        "terrain grid length must match dimensions"
+    );
+    assert_eq!(
+        objects_data.len(),
+        texels,
+        "object grid length must match dimensions"
+    );
+    assert_eq!(
+        tile_lut.len(),
+        TILE_COUNT,
+        "tile LUT must cover the full atlas"
+    );
+
+    let mut lowpass = vec![0u8; texels * 4];
+    for idx in 0..texels {
+        let terrain = tile_lut[grid_data[idx] as usize];
+        let mut rgb = [
+            terrain.rgb[0] as u32,
+            terrain.rgb[1] as u32,
+            terrain.rgb[2] as u32,
+        ];
+
+        let object_id = objects_data[idx];
+        if object_id != 0 {
+            let overlay = tile_lut[object_id as usize + 256];
+            let alpha = overlay.alpha as u32;
+            rgb[0] = (rgb[0] * (255 - alpha) + overlay.rgb[0] as u32 * alpha + 127) / 255;
+            rgb[1] = (rgb[1] * (255 - alpha) + overlay.rgb[1] as u32 * alpha + 127) / 255;
+            rgb[2] = (rgb[2] * (255 - alpha) + overlay.rgb[2] as u32 * alpha + 127) / 255;
+        }
+
+        let out = &mut lowpass[idx * 4..idx * 4 + 4];
+        out[0] = rgb[0] as u8;
+        out[1] = rgb[1] as u8;
+        out[2] = rgb[2] as u8;
+        out[3] = u8::MAX;
+    }
+
+    lowpass
 }
 
 #[derive(Clone, Copy)]
@@ -699,6 +834,7 @@ mod tests {
             gpu.grid_dirty = true;
             gpu.grid_data = vec![1];
             gpu.objects_data = vec![2];
+            gpu.lowpass_data = vec![3, 4, 5, 255];
             gpu.grid_dims = (3, 4);
             gpu.player_tile = [5.0, 6.0];
         }
@@ -715,7 +851,65 @@ mod tests {
         assert!(!gpu.grid_dirty);
         assert!(gpu.grid_data.is_empty());
         assert!(gpu.objects_data.is_empty());
+        assert!(gpu.lowpass_data.is_empty());
         assert_eq!(gpu.grid_dims, (0, 0));
         assert_eq!(gpu.player_tile, [0.0, 0.0]);
+    }
+
+    #[test]
+    fn lowpass_lut_treats_object_black_as_transparent() {
+        let mut atlas = vec![0u8; TILE_COUNT * TILE_RGBA_BYTES];
+
+        atlas[0..TILE_RGBA_BYTES]
+            .chunks_exact_mut(4)
+            .for_each(|px| px.copy_from_slice(&[10, 20, 30, 255]));
+
+        let overlay_start = 256 * TILE_RGBA_BYTES;
+        for (idx, px) in atlas[overlay_start..overlay_start + TILE_RGBA_BYTES]
+            .chunks_exact_mut(4)
+            .enumerate()
+        {
+            if idx < (TILE_SIZE * TILE_SIZE / 2) {
+                px.copy_from_slice(&[200, 100, 50, 255]);
+            }
+        }
+
+        let lut = build_tile_lowpass_lut(&atlas);
+        assert_eq!(
+            lut[0],
+            LowpassTileSample {
+                rgb: [10, 20, 30],
+                alpha: 255
+            }
+        );
+        assert_eq!(
+            lut[256],
+            LowpassTileSample {
+                rgb: [200, 100, 50],
+                alpha: 128
+            }
+        );
+    }
+
+    #[test]
+    fn lowpass_map_blends_object_average_over_terrain() {
+        let mut lut = vec![
+            LowpassTileSample {
+                rgb: [0, 0, 0],
+                alpha: 255,
+            };
+            TILE_COUNT
+        ];
+        lut[7] = LowpassTileSample {
+            rgb: [20, 40, 60],
+            alpha: 255,
+        };
+        lut[256 + 3] = LowpassTileSample {
+            rgb: [220, 120, 20],
+            alpha: 128,
+        };
+
+        let lowpass = build_lowpass_map(&[7], &[3], &lut, 1, 1);
+        assert_eq!(lowpass, vec![120, 80, 40, 255]);
     }
 }
