@@ -1,6 +1,7 @@
 use glow::HasContext;
 
 use crate::tiles::atlas::{TILE_COUNT, TILE_SIZE};
+use crate::tiles::ega::is_ega_black_rgba;
 
 /// Atlas texture layout: 32 columns x 16 rows of 16x16 tiles.
 const ATLAS_COLS: u32 = 32;
@@ -43,6 +44,11 @@ uniform float u_filtered_atlas_padding;
 uniform vec2 u_player_tile;
 
 const float TILE_SIZE_PX = 16.0;
+const float FILTERED_TILE_COLOR_ALPHA_EPSILON = 0.0001;
+const float FILTERED_BLEND_START_TEXELS_PER_PIXEL = 1.0;
+const float FILTERED_BLEND_END_TEXELS_PER_PIXEL = 2.25;
+const float LOWPASS_BLEND_START_TEXELS_PER_PIXEL = 2.5;
+const float LOWPASS_BLEND_END_TEXELS_PER_PIXEL = 4.5;
 
 vec2 atlas_uv_for_tile(float tile_id, vec2 tile_frac) {
     float col = mod(tile_id, u_atlas_cols);
@@ -76,7 +82,7 @@ vec4 filtered_tile_color(float tile_id, vec2 tile_frac, vec2 grad_x, vec2 grad_y
         grad_x,
         grad_y
     );
-    if (filtered.a <= 0.0001) {
+    if (filtered.a <= FILTERED_TILE_COLOR_ALPHA_EPSILON) {
         return vec4(0.0, 0.0, 0.0, 1.0);
     }
     // The filtered atlas encodes palette-0 black as transparent coverage so
@@ -132,13 +138,21 @@ void main() {
     // tile is still several screen pixels wide.
     float tiles_per_pixel = max(fwidth(tile_coord).x, fwidth(tile_coord).y);
     float atlas_texels_per_pixel = tiles_per_pixel * TILE_SIZE_PX;
-    float filtered_mix = smoothstep(1.0, 2.25, atlas_texels_per_pixel);
+    float filtered_mix = smoothstep(
+        FILTERED_BLEND_START_TEXELS_PER_PIXEL,
+        FILTERED_BLEND_END_TEXELS_PER_PIXEL,
+        atlas_texels_per_pixel
+    );
     vec4 atlas_color = mix(detailed_color, filtered_color, filtered_mix);
 
     // Once several source texels map to one screen pixel, even tile-safe
     // mipmaps keep too much intra-tile detail. Blend to the per-tile low-pass
     // overview before the map reaches 1 screen pixel per tile.
-    float lowpass_mix = smoothstep(2.5, 4.5, atlas_texels_per_pixel);
+    float lowpass_mix = smoothstep(
+        LOWPASS_BLEND_START_TEXELS_PER_PIXEL,
+        LOWPASS_BLEND_END_TEXELS_PER_PIXEL,
+        atlas_texels_per_pixel
+    );
     vec2 lowpass_uv = clamp(v_uv, 0.5 / u_grid_size, 1.0 - 0.5 / u_grid_size);
     frag_color = mix(atlas_color, texture(u_lowpass, lowpass_uv), lowpass_mix);
 
@@ -630,11 +644,7 @@ fn rearrange_filtered_atlas(sequential_rgba: &[u8]) -> Vec<u8> {
                 buf[dst_px] = rgba[0];
                 buf[dst_px + 1] = rgba[1];
                 buf[dst_px + 2] = rgba[2];
-                buf[dst_px + 3] = if rgba[0] == 0 && rgba[1] == 0 && rgba[2] == 0 {
-                    0
-                } else {
-                    255
-                };
+                buf[dst_px + 3] = if is_ega_black_rgba(rgba) { 0 } else { 255 };
             }
         }
 

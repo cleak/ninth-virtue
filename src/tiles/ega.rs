@@ -21,6 +21,13 @@ pub const EGA_PALETTE: [[u8; 4]; 16] = [
     [0xFF, 0xFF, 0xFF, 0xFF], // 15 White
 ];
 
+/// Return true when the leading RGB channels match EGA palette entry 0
+/// (black). The alpha channel, if present, is ignored.
+#[inline]
+pub(crate) fn is_ega_black_rgba(rgba: &[u8]) -> bool {
+    rgba.starts_with(&EGA_PALETTE[0][..3])
+}
+
 /// Decode a 4-bit-per-pixel EGA tile row byte into two RGBA pixels.
 ///
 /// Each byte contains two pixels: high nibble first, low nibble second.
@@ -65,5 +72,11 @@ mod tests {
     #[test]
     fn brown_is_correct() {
         assert_eq!(EGA_PALETTE[6], [0xAA, 0x55, 0x00, 0xFF]);
+    }
+
+    #[test]
+    fn recognizes_ega_black_rgba() {
+        assert!(is_ega_black_rgba(&EGA_PALETTE[0]));
+        assert!(!is_ega_black_rgba(&EGA_PALETTE[1]));
     }
 }

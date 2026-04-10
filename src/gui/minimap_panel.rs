@@ -6,6 +6,7 @@ use egui::{Color32, FontId, Pos2, Rect, Stroke, vec2};
 use crate::game::map::{LocationType, MapState, ObjectEntry};
 use crate::game::world_map::{WorldLabelCategory, WorldLocation, WorldMap};
 use crate::tiles::atlas::{TILE_COUNT, TILE_SIZE, TileAtlas};
+use crate::tiles::ega::is_ega_black_rgba;
 
 use super::minimap_gl::MinimapGl;
 
@@ -428,7 +429,7 @@ fn build_tile_lowpass_lut(atlas_rgba: &[u8]) -> Vec<LowpassTileSample> {
         let mut opaque_pixels = 0u32;
 
         for px in tile.chunks_exact(4) {
-            let visible = px[0] != 0 || px[1] != 0 || px[2] != 0;
+            let visible = !is_ega_black_rgba(px);
             if !visible {
                 continue;
             }
