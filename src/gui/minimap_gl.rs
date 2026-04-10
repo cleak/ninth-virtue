@@ -108,8 +108,10 @@ void main() {
             filtered_grad_x,
             filtered_grad_y
         );
+        // Object texels in the filtered atlas are encoded as transparent black
+        // or opaque RGB, so minification already produces premultiplied color.
         filtered_color = vec4(
-            filtered_color.rgb * (1.0 - obj_filtered.a) + obj_filtered.rgb * obj_filtered.a,
+            filtered_color.rgb * (1.0 - obj_filtered.a) + obj_filtered.rgb,
             1.0
         );
     }
@@ -611,6 +613,9 @@ fn rearrange_filtered_atlas(sequential_rgba: &[u8]) -> Vec<u8> {
                     let src_px = src_off + px * 4;
                     let dst_px = dst_off + px * 4;
                     let rgba = &sequential_rgba[src_px..src_px + 4];
+                    // Object sprites use black as transparent. Keep that as
+                    // transparent black so linear and mip filtering produce
+                    // coverage-weighted (premultiplied) RGB at the edges.
                     buf[dst_px] = rgba[0];
                     buf[dst_px + 1] = rgba[1];
                     buf[dst_px + 2] = rgba[2];
