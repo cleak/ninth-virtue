@@ -44,6 +44,7 @@ pub struct UltimaCompanion {
     minimap: MinimapState,
     game_dir: Option<PathBuf>,
     tile_atlas: Option<TileAtlas>,
+    tile_atlas_error: Option<String>,
     world_map: Option<WorldMap>,
 
     // Timing
@@ -84,6 +85,7 @@ impl UltimaCompanion {
             minimap: MinimapState::new(),
             game_dir: None,
             tile_atlas: None,
+            tile_atlas_error: None,
             world_map: None,
             last_process_scan: Instant::now(),
             last_rescan: Instant::now(),
@@ -149,11 +151,13 @@ impl UltimaCompanion {
                 }
 
                 // Try to locate game data files and load tile atlas + world map
+                self.tile_atlas_error = None;
                 match config::find_game_directory(proc.memory.handle()) {
                     Ok(dir) => {
                         match TileAtlas::load(&dir) {
                             Ok(atlas) => {
                                 self.tile_atlas = Some(atlas);
+                                self.tile_atlas_error = None;
                                 // Only load the world map if the atlas succeeded
                                 match WorldMap::load(&dir) {
                                     Ok(wm) => self.world_map = Some(wm),
@@ -166,8 +170,12 @@ impl UltimaCompanion {
                                 }
                             }
                             Err(e) => {
-                                self.status_msg =
-                                    format!("Tiles failed: {e} (dir: {})", dir.display());
+                                let load_error = format!(
+                                    "Failed to load tile atlas from {}: {e}",
+                                    dir.display()
+                                );
+                                self.status_msg = load_error.clone();
+                                self.tile_atlas_error = Some(load_error);
                             }
                         }
                         self.game_dir = Some(dir);
@@ -211,6 +219,7 @@ impl UltimaCompanion {
         self.minimap.clear();
         self.game_dir = None;
         self.tile_atlas = None;
+        self.tile_atlas_error = None;
         self.world_map = None;
         self.audio_session = None;
         self.suppress_auto_attach = true;
@@ -271,6 +280,7 @@ impl UltimaCompanion {
         self.minimap.clear();
         self.game_dir = None;
         self.tile_atlas = None;
+        self.tile_atlas_error = None;
         self.world_map = None;
         self.audio_session = None;
         self.status_msg = "Process terminated".to_string();
@@ -457,6 +467,7 @@ impl eframe::App for UltimaCompanion {
             frigates,
             minimap,
             tile_atlas,
+            tile_atlas_error,
             world_map,
             game_dir,
             patch_state,
@@ -519,12 +530,12 @@ impl eframe::App for UltimaCompanion {
                     gui::minimap_panel::show(ui, minimap, atlas, world_map.as_ref());
                 } else if attached.is_some() {
                     // Only show load errors when actually attached to a process
-                    let status = match game_dir {
-                        Some(dir) => format!("Tiles not found in {}", dir.display()),
+                    let status = tile_atlas_error.clone().unwrap_or_else(|| match game_dir {
+                        Some(dir) => format!("Failed to load tile atlas from {}", dir.display()),
                         None => {
-                            "Game directory not found - could not locate DOSBox config".to_string()
+                            "Game directory not found; could not locate DOSBox config".to_string()
                         }
-                    };
+                    });
                     gui::minimap_panel::show_no_atlas(ui, &status);
                 }
             });
