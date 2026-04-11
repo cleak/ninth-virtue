@@ -180,7 +180,9 @@ impl UltimaCompanion {
                         self.game_dir = Some(dir);
                     }
                     Err(e) => {
-                        self.status_msg = format!("Game dir not found: {e}");
+                        let game_dir_error = format!("Game dir not found: {e}");
+                        self.status_msg = game_dir_error.clone();
+                        self.tile_atlas_error = Some(game_dir_error);
                     }
                 }
 
