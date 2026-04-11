@@ -157,7 +157,6 @@ impl UltimaCompanion {
                         match TileAtlas::load(&dir) {
                             Ok(atlas) => {
                                 self.tile_atlas = Some(atlas);
-                                self.tile_atlas_error = None;
                                 // Only load the world map if the atlas succeeded
                                 match WorldMap::load(&dir) {
                                     Ok(wm) => self.world_map = Some(wm),
