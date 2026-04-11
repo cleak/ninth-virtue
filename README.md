@@ -40,7 +40,7 @@ For reverse engineers, it is also a concrete example of process attachment, emul
 ## Requirements
 
 - Windows
-- Rust toolchain
+- Rust 1.92+ toolchain
 - A running DOSBox or DOSBox Staging process
 - Ultima V already available inside that process
 
