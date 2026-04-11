@@ -3,7 +3,10 @@ use std::sync::{Arc, Mutex};
 use egui::epaint::PaintCallbackInfo;
 use egui::{Color32, FontId, Pos2, Rect, Stroke, vec2};
 
-use crate::game::map::{LocationType, MapState, ObjectEntry};
+use crate::game::map::{LocationType, MapState, ObjectEntry, TileGridEncoding};
+use crate::game::offsets::{
+    COMBAT_TERRAIN_HEIGHT, COMBAT_TERRAIN_LEN, COMBAT_TERRAIN_STRIDE, COMBAT_TERRAIN_WIDTH,
+};
 use crate::game::world_map::{WorldLabelCategory, WorldLocation, WorldMap};
 use crate::tiles::atlas::{TILE_COUNT, TILE_SIZE, TileAtlas};
 use crate::tiles::ega::is_ega_black_rgba;
@@ -197,7 +200,7 @@ pub fn show(
     } else {
         format!("{} ({}, {}) Z:{}", map.location.name(), map.x, map.y, map.z)
     };
-    let is_overworld = map.location == LocationType::Overworld;
+    let is_overworld = map.location.is_overworld();
 
     ui.vertical(|ui| {
         // Keep zoom controls grouped with the header; label filters get their own row.
@@ -263,10 +266,7 @@ pub fn show(
                 let half = zoom as f32 / 2.0;
                 (grid, zoom as u32, zoom as u32, [half, half])
             } else {
-                let grid = linearize_town_grid(&map.tiles);
-                let pbx = map.x.wrapping_sub(map.scroll_x) as f32;
-                let pby = map.y.wrapping_sub(map.scroll_y) as f32;
-                (grid, 32, 32, [pbx, pby])
+                extract_local_scene_grid(map)
             };
 
         let objects_data =
@@ -371,8 +371,10 @@ fn extract_overworld_grid(world: &WorldMap, cx: u8, cy: u8, zoom: usize) -> Vec<
     grid
 }
 
-/// Linearize the chunked 32x32 town/dungeon tile grid to row-major order.
-fn linearize_town_grid(tiles: &[u8; 1024]) -> Vec<u8> {
+/// Decode the overworld MAP_TILES buffer when we do not have BRIT.DAT available.
+///
+/// The live overworld buffer is arranged as four 16x16 chunks.
+fn linearize_chunked_grid(tiles: &[u8; 1024]) -> Vec<u8> {
     let mut grid = vec![0u8; 32 * 32];
     for gy in 0..32usize {
         for gx in 0..32usize {
@@ -382,6 +384,58 @@ fn linearize_town_grid(tiles: &[u8; 1024]) -> Vec<u8> {
             let ly = gy % 16;
             grid[gy * 32 + gx] = tiles[(cy * 2 + cx) * 256 + ly * 16 + lx];
         }
+    }
+    grid
+}
+
+/// Decode a plain 32x32 row-major MAP_TILES window.
+fn extract_row_major_grid(tiles: &[u8; 1024]) -> Vec<u8> {
+    tiles.to_vec()
+}
+
+/// Decode the current non-overworld scene into a renderable grid plus player position.
+fn extract_local_scene_grid(map: &MapState) -> (Vec<u8>, u32, u32, [f32; 2]) {
+    match map.location.tile_grid_encoding() {
+        TileGridEncoding::Chunked16x16 => {
+            let pbx = map.x.wrapping_sub(map.scroll_x) as f32;
+            let pby = map.y.wrapping_sub(map.scroll_y) as f32;
+            (linearize_chunked_grid(&map.tiles), 32, 32, [pbx, pby])
+        }
+        TileGridEncoding::RowMajor32 => {
+            let pbx = map.x.wrapping_sub(map.scroll_x) as f32;
+            let pby = map.y.wrapping_sub(map.scroll_y) as f32;
+            (extract_row_major_grid(&map.tiles), 32, 32, [pbx, pby])
+        }
+        TileGridEncoding::Combat11x11Stride32 => {
+            debug_assert!(
+                map.combat_tiles.is_some(),
+                "combat scenes should include the dedicated combat terrain grid"
+            );
+            (
+                map.combat_tiles
+                    .as_ref()
+                    .map(extract_combat_grid)
+                    .unwrap_or_else(|| vec![0; COMBAT_TERRAIN_WIDTH * COMBAT_TERRAIN_HEIGHT]),
+                COMBAT_TERRAIN_WIDTH as u32,
+                COMBAT_TERRAIN_HEIGHT as u32,
+                [map.x as f32, map.y as f32],
+            )
+        }
+    }
+}
+
+/// Decode the combat terrain scratch grid.
+///
+/// Combat stores an 11x11 active battlefield in the first 11 columns of a
+/// 32-byte-stride buffer. The remaining bytes in each row are unrelated combat
+/// tables, so they must be discarded.
+fn extract_combat_grid(tiles: &[u8; COMBAT_TERRAIN_LEN]) -> Vec<u8> {
+    let mut grid = vec![0u8; COMBAT_TERRAIN_WIDTH * COMBAT_TERRAIN_HEIGHT];
+    for y in 0..COMBAT_TERRAIN_HEIGHT {
+        let src = y * COMBAT_TERRAIN_STRIDE;
+        let dst = y * COMBAT_TERRAIN_WIDTH;
+        grid[dst..dst + COMBAT_TERRAIN_WIDTH]
+            .copy_from_slice(&tiles[src..src + COMBAT_TERRAIN_WIDTH]);
     }
     grid
 }
@@ -398,17 +452,26 @@ fn build_objects_overlay(
 ) -> Vec<u8> {
     let mut overlay = vec![0u8; grid_w * grid_h];
     let half = grid_w as i32 / 2;
-    let overworld = map.location == LocationType::Overworld;
+    let overworld = map.location.is_overworld();
+    let combat = matches!(map.location, LocationType::Combat(_));
 
     for obj in objects {
+        if !overworld && obj.floor != map.z {
+            continue;
+        }
+
         let (gx, gy) = if overworld {
             let vx = (obj.x as i32 - map.x as i32 + half).rem_euclid(256);
             let vy = (obj.y as i32 - map.y as i32 + half).rem_euclid(256);
             (vx, vy)
+        } else if combat {
+            // Combat actors already use battlefield-local coordinates even when
+            // scroll_x/scroll_y still contain overworld chunk state.
+            (obj.x as i32, obj.y as i32)
         } else {
             (
-                obj.x.wrapping_sub(map.scroll_x) as i32,
-                obj.y.wrapping_sub(map.scroll_y) as i32,
+                obj.x as i32 - map.scroll_x as i32,
+                obj.y as i32 - map.scroll_y as i32,
             )
         };
 
@@ -906,6 +969,7 @@ mod tests {
             scroll_x: 0,
             scroll_y: 0,
             tiles: [0; 1024],
+            combat_tiles: None,
             objects: Vec::new(),
         });
         state.last_grid_key = Some(GridCacheKey {
@@ -1020,5 +1084,143 @@ mod tests {
 
         let lowpass = build_lowpass_map(&[7], &[3], &lut, 1, 1);
         assert_eq!(lowpass, vec![120, 80, 40, 255]);
+    }
+
+    #[test]
+    fn local_object_overlay_ignores_other_floors() {
+        let map = MapState {
+            location: LocationType::Town(2),
+            z: 0xFF,
+            x: 12,
+            y: 8,
+            transport: 0,
+            scroll_x: 0,
+            scroll_y: 0,
+            tiles: [0; 1024],
+            combat_tiles: None,
+            objects: Vec::new(),
+        };
+        let objects = vec![
+            ObjectEntry {
+                tile: 7,
+                x: 4,
+                y: 5,
+                floor: 0xFF,
+            },
+            ObjectEntry {
+                tile: 9,
+                x: 6,
+                y: 7,
+                floor: 0,
+            },
+        ];
+
+        let overlay = build_objects_overlay(&objects, 32, 32, &map);
+        assert_eq!(overlay[5 * 32 + 4], 7);
+        assert_eq!(overlay[7 * 32 + 6], 0);
+    }
+
+    #[test]
+    fn combat_objects_use_battlefield_coordinates() {
+        let map = MapState {
+            location: LocationType::Combat(0x80),
+            z: 0,
+            x: 4,
+            y: 10,
+            transport: 0,
+            scroll_x: 192,
+            scroll_y: 48,
+            tiles: [0; 1024],
+            combat_tiles: None,
+            objects: Vec::new(),
+        };
+        let objects = vec![ObjectEntry {
+            tile: 11,
+            x: 6,
+            y: 9,
+            floor: 0,
+        }];
+
+        let overlay = build_objects_overlay(&objects, 11, 11, &map);
+        assert_eq!(overlay[9 * 11 + 6], 11);
+    }
+
+    #[test]
+    fn chunked_overworld_grid_linearizes_to_row_major() {
+        let mut tiles = [0u8; 1024];
+        for gy in 0..32usize {
+            for gx in 0..32usize {
+                let cx = gx / 16;
+                let cy = gy / 16;
+                let lx = gx % 16;
+                let ly = gy % 16;
+                tiles[(cy * 2 + cx) * 256 + ly * 16 + lx] = (gy * 32 + gx) as u8;
+            }
+        }
+
+        let grid = linearize_chunked_grid(&tiles);
+        for (idx, tile) in grid.into_iter().enumerate() {
+            assert_eq!(tile, idx as u8);
+        }
+    }
+
+    #[test]
+    fn row_major_grid_is_read_verbatim() {
+        let mut tiles = [0u8; 1024];
+        for (idx, tile) in tiles.iter_mut().enumerate() {
+            *tile = (idx % 251) as u8;
+        }
+
+        assert_eq!(extract_row_major_grid(&tiles), tiles.to_vec());
+    }
+
+    #[test]
+    fn local_scene_grid_uses_combat_dimensions_and_marker() {
+        let mut combat_tiles = [0u8; COMBAT_TERRAIN_LEN];
+        combat_tiles[10 * COMBAT_TERRAIN_STRIDE + 4] = 0x44;
+        let map = MapState {
+            location: LocationType::Combat(0xFF),
+            z: 0,
+            x: 4,
+            y: 10,
+            transport: 0,
+            scroll_x: 192,
+            scroll_y: 48,
+            tiles: [0; 1024],
+            combat_tiles: Some(combat_tiles),
+            objects: Vec::new(),
+        };
+
+        let (grid, width, height, marker) = extract_local_scene_grid(&map);
+        assert_eq!((width, height), (11, 11));
+        assert_eq!(marker, [4.0, 10.0]);
+        assert_eq!(grid[10 * 11 + 4], 0x44);
+    }
+
+    #[test]
+    fn combat_grid_discards_padding_columns() {
+        let mut tiles = [0xEE; COMBAT_TERRAIN_LEN];
+        for y in 0..COMBAT_TERRAIN_HEIGHT {
+            for x in 0..COMBAT_TERRAIN_WIDTH {
+                tiles[y * COMBAT_TERRAIN_STRIDE + x] = (y * COMBAT_TERRAIN_WIDTH + x) as u8;
+            }
+        }
+
+        let grid = extract_combat_grid(&tiles);
+        for (idx, tile) in grid.into_iter().enumerate() {
+            assert_eq!(tile, idx as u8);
+        }
+    }
+
+    #[test]
+    fn combat_uses_dedicated_grid_encoding() {
+        assert_eq!(
+            LocationType::Combat(0x80).tile_grid_encoding(),
+            TileGridEncoding::Combat11x11Stride32
+        );
+        assert_eq!(
+            LocationType::Town(1).tile_grid_encoding(),
+            TileGridEncoding::RowMajor32
+        );
     }
 }

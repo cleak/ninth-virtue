@@ -35,6 +35,22 @@ pub const MAP_SCROLL_Y: usize = 0x2F6;
 pub const MAP_TILES: usize = 0x1062;
 pub const MAP_TILES_LEN: usize = 1024;
 
+/// DATA.OVL's live data segment base in DOS memory.
+///
+/// The original code addresses `MAP_TILES` at DS:0x6608, while the same buffer
+/// sits at save offset `MAP_TILES` within `SAVED.GAM`. That gives us the
+/// runtime DOS base for other DS-relative combat buffers.
+pub const DATA_SEG_MAP_TILES: usize = 0x6608;
+pub const DATA_SEG_BASE: usize = SAVE_BASE + MAP_TILES - DATA_SEG_MAP_TILES;
+
+/// Combat terrain scratch grid (DS:0xAD14): 11 active columns per row with a
+/// 32-byte stride.
+pub const COMBAT_TERRAIN_GRID: usize = 0xAD14;
+pub const COMBAT_TERRAIN_WIDTH: usize = 11;
+pub const COMBAT_TERRAIN_HEIGHT: usize = 11;
+pub const COMBAT_TERRAIN_STRIDE: usize = 32;
+pub const COMBAT_TERRAIN_LEN: usize = COMBAT_TERRAIN_HEIGHT * COMBAT_TERRAIN_STRIDE;
+
 // Inventory save offsets (add SAVE_BASE for DOS address)
 pub const INV_FOOD: usize = 0x202;
 pub const INV_GOLD: usize = 0x204;
@@ -94,6 +110,11 @@ pub const fn char_addr(dos_base: usize, char_index: usize, field_offset: usize) 
 /// Compute the absolute address of an inventory field.
 pub const fn inv_addr(dos_base: usize, save_offset: usize) -> usize {
     dos_base + SAVE_BASE + save_offset
+}
+
+/// Compute the absolute DOS address of a DS-relative live buffer.
+pub const fn ds_addr(dos_base: usize, ds_offset: usize) -> usize {
+    dos_base + DATA_SEG_BASE + ds_offset
 }
 
 /// Compute the absolute address of an object table entry field.
@@ -181,5 +202,13 @@ mod tests {
         let c1 = char_addr(0, 1, 0);
         assert_eq!(c1 - c0, CHAR_RECORD_SIZE);
         assert_eq!(CHAR_RECORD_SIZE, 0x20);
+    }
+
+    #[test]
+    fn ds_offsets_match_known_live_buffers() {
+        assert_eq!(DATA_SEG_BASE, 0x1F280);
+        assert_eq!(ds_addr(0, DATA_SEG_MAP_TILES), inv_addr(0, MAP_TILES));
+        assert_eq!(ds_addr(0, 0x5896), inv_addr(0, MAP_X));
+        assert_eq!(ds_addr(0, 0x5897), inv_addr(0, MAP_Y));
     }
 }
