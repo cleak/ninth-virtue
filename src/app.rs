@@ -44,6 +44,7 @@ pub struct UltimaCompanion {
     minimap: MinimapState,
     game_dir: Option<PathBuf>,
     tile_atlas: Option<TileAtlas>,
+    tile_atlas_error: Option<String>,
     world_map: Option<WorldMap>,
 
     // Timing
@@ -84,6 +85,7 @@ impl UltimaCompanion {
             minimap: MinimapState::new(),
             game_dir: None,
             tile_atlas: None,
+            tile_atlas_error: None,
             world_map: None,
             last_process_scan: Instant::now(),
             last_rescan: Instant::now(),
@@ -149,6 +151,7 @@ impl UltimaCompanion {
                 }
 
                 // Try to locate game data files and load tile atlas + world map
+                self.tile_atlas_error = None;
                 match config::find_game_directory(proc.memory.handle()) {
                     Ok(dir) => {
                         match TileAtlas::load(&dir) {
@@ -166,14 +169,20 @@ impl UltimaCompanion {
                                 }
                             }
                             Err(e) => {
-                                self.status_msg =
-                                    format!("Tiles failed: {e} (dir: {})", dir.display());
+                                let load_error = format!(
+                                    "Failed to load tile atlas from {}: {e}",
+                                    dir.display()
+                                );
+                                self.status_msg = load_error.clone();
+                                self.tile_atlas_error = Some(load_error);
                             }
                         }
                         self.game_dir = Some(dir);
                     }
                     Err(e) => {
-                        self.status_msg = format!("Game dir not found: {e}");
+                        let game_dir_error = format!("Game dir not found: {e}");
+                        self.status_msg = game_dir_error.clone();
+                        self.tile_atlas_error = Some(game_dir_error);
                     }
                 }
 
@@ -211,6 +220,7 @@ impl UltimaCompanion {
         self.minimap.clear();
         self.game_dir = None;
         self.tile_atlas = None;
+        self.tile_atlas_error = None;
         self.world_map = None;
         self.audio_session = None;
         self.suppress_auto_attach = true;
@@ -271,6 +281,7 @@ impl UltimaCompanion {
         self.minimap.clear();
         self.game_dir = None;
         self.tile_atlas = None;
+        self.tile_atlas_error = None;
         self.world_map = None;
         self.audio_session = None;
         self.status_msg = "Process terminated".to_string();
@@ -457,6 +468,7 @@ impl eframe::App for UltimaCompanion {
             frigates,
             minimap,
             tile_atlas,
+            tile_atlas_error,
             world_map,
             game_dir,
             patch_state,
@@ -475,31 +487,12 @@ impl eframe::App for UltimaCompanion {
         // --- Memory watch window ---
         gui::memory_watch_panel::show(ctx, memory_watch, mem);
 
-        // --- Mini-map (anchored bottom panel) ---
-        egui::TopBottomPanel::bottom("minimap")
-            .min_height(300.0)
-            .resizable(true)
-            .show(ctx, |ui| {
-                gui::section_frame(ui).show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    if let Some(atlas) = tile_atlas.as_ref() {
-                        gui::minimap_panel::show(ui, minimap, atlas, world_map.as_ref());
-                    } else if attached.is_some() {
-                        // Only show load errors when actually attached to a process
-                        let status = match game_dir {
-                            Some(dir) => format!("Tiles not found in {}", dir.display()),
-                            None => "Game directory not found — could not locate DOSBox config"
-                                .to_string(),
-                        };
-                        gui::minimap_panel::show_no_atlas(ui, &status);
-                    }
-                });
-            });
-
         // --- Party, inventory, actions ---
         let mut game_written = false;
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        // Let the dashboard keep its natural content height so the minimap
+        // can take the rest of the window.
+        egui::TopBottomPanel::top("dashboard").show(ctx, |ui| {
             gui::section_frame(ui).show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 game_written |=
@@ -510,23 +503,42 @@ impl eframe::App for UltimaCompanion {
 
             ui.columns(4, |cols| {
                 gui::section_frame(&cols[0]).show(&mut cols[0], |ui| {
-                    ui.set_min_size(ui.available_size());
+                    ui.set_min_width(ui.available_width());
                     game_written |= gui::inventory_panel::show_resources(ui, inventory, mem);
                 });
                 gui::section_frame(&cols[1]).show(&mut cols[1], |ui| {
-                    ui.set_min_size(ui.available_size());
+                    ui.set_min_width(ui.available_width());
                     game_written |= gui::inventory_panel::show_reagents(ui, inventory, mem);
                 });
                 gui::section_frame(&cols[2]).show(&mut cols[2], |ui| {
-                    ui.set_min_size(ui.available_size());
+                    ui.set_min_width(ui.available_width());
                     game_written |= gui::actions_panel::show(ui, party, inventory, frigates, mem);
                     ui.add_space(8.0);
                     gui::audio_panel::show(ui, audio_session, audio_volume, audio_muted);
                 });
                 gui::section_frame(&cols[3]).show(&mut cols[3], |ui| {
-                    ui.set_min_size(ui.available_size());
+                    ui.set_min_width(ui.available_width());
                     gui::quest_panel::show(ui, shrine_quest);
                 });
+            });
+        });
+
+        // --- Mini-map (fills all remaining space) ---
+        egui::CentralPanel::default().show(ctx, |ui| {
+            gui::section_frame(ui).show(ui, |ui| {
+                ui.set_min_size(ui.available_size());
+                if let Some(atlas) = tile_atlas.as_ref() {
+                    gui::minimap_panel::show(ui, minimap, atlas, world_map.as_ref());
+                } else if attached.is_some() {
+                    // Only show load errors when actually attached to a process
+                    let status = tile_atlas_error.clone().unwrap_or_else(|| match game_dir {
+                        Some(dir) => format!("Failed to load tile atlas from {}", dir.display()),
+                        None => {
+                            "Game directory not found; could not locate DOSBox config".to_string()
+                        }
+                    });
+                    gui::minimap_panel::show_no_atlas(ui, &status);
+                }
             });
         });
 
