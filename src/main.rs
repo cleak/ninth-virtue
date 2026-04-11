@@ -21,6 +21,8 @@ fn main() -> eframe::Result {
             .with_inner_size([800.0, 1000.0])
             .with_title("The Ninth Virtue")
             .with_icon(icon::load_app_icon()),
+        // The minimap uses egui_glow paint callbacks, so keep the native renderer on Glow.
+        renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
     eframe::run_native(
@@ -42,17 +44,17 @@ fn main() -> eframe::Result {
                 cc.egui_ctx.set_fonts(fonts);
             }
 
-            let mut style = (*cc.egui_ctx.style()).clone();
-            style.spacing.item_spacing = egui::vec2(8.0, 4.0);
-            for ws in [
-                &mut style.visuals.widgets.inactive,
-                &mut style.visuals.widgets.hovered,
-                &mut style.visuals.widgets.active,
-                &mut style.visuals.widgets.open,
-            ] {
-                ws.corner_radius = egui::CornerRadius::same(4);
-            }
-            cc.egui_ctx.set_style(style);
+            cc.egui_ctx.global_style_mut(|style| {
+                style.spacing.item_spacing = egui::vec2(8.0, 4.0);
+                for ws in [
+                    &mut style.visuals.widgets.inactive,
+                    &mut style.visuals.widgets.hovered,
+                    &mut style.visuals.widgets.active,
+                    &mut style.visuals.widgets.open,
+                ] {
+                    ws.corner_radius = egui::CornerRadius::same(4);
+                }
+            });
             Ok(Box::new(app::UltimaCompanion::new()))
         }),
     )

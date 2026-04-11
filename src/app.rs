@@ -212,6 +212,11 @@ impl UltimaCompanion {
             injection::remove_patch(&attached.process.memory, state);
         }
         self.patch_state = None;
+        self.clear_attached_state("Disconnected");
+        self.suppress_auto_attach = true;
+    }
+
+    fn clear_attached_state(&mut self, status_msg: &str) {
         self.attached = None;
         self.party.clear();
         self.inventory = Inventory::default();
@@ -223,8 +228,8 @@ impl UltimaCompanion {
         self.tile_atlas_error = None;
         self.world_map = None;
         self.audio_session = None;
-        self.suppress_auto_attach = true;
-        self.status_msg = "Disconnected".to_string();
+        self.memory_watch.stop_recording();
+        self.status_msg = status_msg.to_string();
     }
 
     /// Try to apply the code-cave patch for stats redraw.  Non-fatal on
@@ -273,18 +278,7 @@ impl UltimaCompanion {
 
     fn handle_process_death(&mut self) {
         self.patch_state = None; // Don't try to unpatch a dead process.
-        self.attached = None;
-        self.party.clear();
-        self.inventory = Inventory::default();
-        self.shrine_quest = ShrineQuest::default();
-        self.frigates.clear();
-        self.minimap.clear();
-        self.game_dir = None;
-        self.tile_atlas = None;
-        self.tile_atlas_error = None;
-        self.world_map = None;
-        self.audio_session = None;
-        self.status_msg = "Process terminated".to_string();
+        self.clear_attached_state("Process terminated");
     }
 
     fn rescan_memory(&mut self) {
@@ -379,7 +373,7 @@ impl UltimaCompanion {
 }
 
 impl eframe::App for UltimaCompanion {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // --- Auto-management ---
         if self.attached.is_none() {
             // Periodically scan for DOSBox processes.
@@ -417,13 +411,30 @@ impl eframe::App for UltimaCompanion {
             }
         }
 
+        // --- Memory watch polling (every frame while recording) ---
+        if self.memory_watch.recording {
+            if let Some(ref attached) = self.attached {
+                if let Some(dos_base) = attached.dos_base {
+                    self.memory_watch.poll(&attached.process.memory, dos_base);
+                    // Keep repainting at max rate while recording while we have a source to poll.
+                    ctx.request_repaint();
+                }
+            } else {
+                self.memory_watch.stop_recording();
+            }
+        }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+
         // --- Connection bar ---
         let mut conn_action = gui::connection_bar::ConnectionAction::None;
         let is_attached = self.attached.is_some();
         let game_confirmed = self.attached.as_ref().is_some_and(|a| a.game_confirmed);
         let dos_base = self.attached.as_ref().and_then(|a| a.dos_base);
 
-        egui::TopBottomPanel::top("connection").show(ctx, |ui| {
+        egui::Panel::top("connection").show_inside(ui, |ui| {
             conn_action = gui::connection_bar::show(
                 ui,
                 &self.process_list,
@@ -445,17 +456,6 @@ impl eframe::App for UltimaCompanion {
             }
             gui::connection_bar::ConnectionAction::Detach => self.detach(),
             gui::connection_bar::ConnectionAction::None => {}
-        }
-
-        // --- Memory watch polling (every frame while recording) ---
-        if self.memory_watch.recording {
-            if let Some(ref attached) = self.attached
-                && let Some(dos_base) = attached.dos_base
-            {
-                self.memory_watch.poll(&attached.process.memory, dos_base);
-            }
-            // Keep repainting at max rate while recording.
-            ctx.request_repaint();
         }
 
         // --- Main content ---
@@ -485,14 +485,14 @@ impl eframe::App for UltimaCompanion {
         });
 
         // --- Memory watch window ---
-        gui::memory_watch_panel::show(ctx, memory_watch, mem);
+        gui::memory_watch_panel::show(&ctx, memory_watch, mem);
 
         // --- Party, inventory, actions ---
         let mut game_written = false;
 
         // Let the dashboard keep its natural content height so the minimap
         // can take the rest of the window.
-        egui::TopBottomPanel::top("dashboard").show(ctx, |ui| {
+        egui::Panel::top("dashboard").show_inside(ui, |ui| {
             gui::section_frame(ui).show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 game_written |=
@@ -524,7 +524,7 @@ impl eframe::App for UltimaCompanion {
         });
 
         // --- Mini-map (fills all remaining space) ---
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show_inside(ui, |ui| {
             gui::section_frame(ui).show(ui, |ui| {
                 ui.set_min_size(ui.available_size());
                 if let Some(atlas) = tile_atlas.as_ref() {
@@ -547,5 +547,64 @@ impl eframe::App for UltimaCompanion {
         if game_written && let (Some((mem, _)), Some(patch)) = (mem, patch_state.as_ref()) {
             let _ = injection::trigger_redraw(mem, patch);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_app() -> UltimaCompanion {
+        let mut memory_watch = MemoryWatch::default();
+        memory_watch.visible = true;
+        memory_watch.recording = true;
+
+        UltimaCompanion {
+            process_list: vec![(1234, "dosbox".to_string())],
+            selected_pid: Some(1234),
+            attached: None,
+            party: Vec::new(),
+            inventory: Inventory::default(),
+            shrine_quest: ShrineQuest::default(),
+            frigates: Vec::new(),
+            minimap: MinimapState::new(),
+            game_dir: Some(PathBuf::from("C:/games/u5")),
+            tile_atlas: None,
+            tile_atlas_error: None,
+            world_map: None,
+            last_process_scan: Instant::now(),
+            last_rescan: Instant::now(),
+            suppress_auto_attach: false,
+            auto_refresh: true,
+            refresh_interval_secs: 0.025,
+            last_refresh: Instant::now(),
+            status_msg: "Connected".to_string(),
+            patch_state: None,
+            memory_watch,
+            audio_session: None,
+            audio_volume: 1.0,
+            audio_muted: false,
+        }
+    }
+
+    #[test]
+    fn detach_stops_memory_watch_recording() {
+        let mut app = test_app();
+
+        app.detach();
+
+        assert!(!app.memory_watch.recording);
+        assert!(app.suppress_auto_attach);
+        assert_eq!(app.status_msg, "Disconnected");
+    }
+
+    #[test]
+    fn handle_process_death_stops_memory_watch_recording() {
+        let mut app = test_app();
+
+        app.handle_process_death();
+
+        assert!(!app.memory_watch.recording);
+        assert_eq!(app.status_msg, "Process terminated");
     }
 }

@@ -4,20 +4,21 @@ version = "0.5.0"
 publish = false
 license = "MIT OR Apache-2.0"
 edition = "2024"
+rust-version = "1.92"
 default-run = "ninth-virtue"
 
 [dependencies]
-eframe = "0.31"
-egui = "0.31"
-egui_extras = "0.31"
+eframe = { version = "0.34", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
+egui = "0.34"
+egui_extras = "0.34"
 anyhow = "1"
 log = "0.4"
 env_logger = "0.11"
 thiserror = "2"
 bytemuck = "1"
-glow = "0.16"
-egui_glow = "0.31"
-windows = { version = "0.61", features = [
+glow = "0.17"
+egui_glow = "0.34"
+windows = { version = "0.62", features = [
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Threading",
     "Win32_System_Diagnostics_Debug",
