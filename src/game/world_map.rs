@@ -65,6 +65,9 @@ impl WorldLocation {
                 LocationType::Keep(_) => WorldLabelCategory::Keep,
                 LocationType::Dungeon(_) => WorldLabelCategory::Dungeon,
                 LocationType::Overworld => WorldLabelCategory::Town,
+                LocationType::Combat(_) => {
+                    unreachable!("combat scenes do not appear in overworld labels")
+                }
             },
             WorldLabelKind::Shrine(_) => WorldLabelCategory::Shrine,
         }
