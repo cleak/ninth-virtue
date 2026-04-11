@@ -203,10 +203,11 @@ pub fn show(
     let is_overworld = map.location.is_overworld();
 
     ui.vertical(|ui| {
-        // Keep zoom controls grouped with the header; label filters get their own row.
-        ui.horizontal_wrapped(|ui| {
-            ui.label(&header);
-            ui.separator();
+        // Keep the changing coordinate text on its own line so movement cannot
+        // reflow the zoom controls and resize the map panel.
+        ui.add(egui::Label::new(&header).truncate());
+
+        ui.horizontal(|ui| {
             if ui.small_button("\u{2796}").clicked() {
                 state.zoom = (state.zoom * 4 / 3).min(ZOOM_MAX);
             }
