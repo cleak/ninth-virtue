@@ -48,6 +48,10 @@ const float FILTERED_BLEND_START_TEXELS_PER_PIXEL = 1.0;
 const float FILTERED_BLEND_END_TEXELS_PER_PIXEL = 2.25;
 const float LOWPASS_BLEND_START_TEXELS_PER_PIXEL = 2.5;
 const float LOWPASS_BLEND_END_TEXELS_PER_PIXEL = 4.5;
+// 1.0 is the linear-light coverage baseline; nudging slightly above that trims
+// the last bit of brightness lift that remains after black outline texels drop
+// out at far zoom levels.
+const float BRIGHTNESS_CURVE_EXPONENT = 1.1;
 
 vec2 atlas_uv_for_tile(float tile_id, vec2 tile_frac) {
     float col = mod(tile_id, u_atlas_cols);
@@ -74,20 +78,40 @@ vec2 filtered_atlas_grad(vec2 tile_coord_grad) {
     return tile_coord_grad * (TILE_SIZE_PX - 1.0) / u_filtered_atlas_size;
 }
 
+vec4 decode_coverage_color(vec4 sample) {
+    if (sample.a <= FILTERED_TILE_COLOR_ALPHA_EPSILON) {
+        return vec4(0.0);
+    }
+    return vec4(sample.rgb / sample.a, sample.a);
+}
+
+vec3 srgb_to_linear(vec3 srgb) {
+    vec3 cutoff = step(vec3(0.04045), srgb);
+    vec3 low = srgb / 12.92;
+    vec3 high = pow((srgb + 0.055) / 1.055, vec3(2.4));
+    return mix(low, high, cutoff);
+}
+
+vec3 linear_to_srgb(vec3 linear) {
+    vec3 clamped = max(linear, vec3(0.0));
+    vec3 cutoff = step(vec3(0.0031308), clamped);
+    vec3 low = clamped * 12.92;
+    vec3 high = 1.055 * pow(clamped, vec3(1.0 / 2.4)) - 0.055;
+    return clamp(mix(low, high, cutoff), 0.0, 1.0);
+}
+
+vec3 apply_perceptual_coverage_curve(vec3 srgb, float coverage) {
+    float brightness_scale = pow(clamp(coverage, 0.0, 1.0), BRIGHTNESS_CURVE_EXPONENT);
+    return linear_to_srgb(srgb_to_linear(srgb) * brightness_scale);
+}
+
 vec4 filtered_tile_color(float tile_id, vec2 tile_frac, vec2 grad_x, vec2 grad_y) {
-    vec4 filtered = textureGrad(
+    return textureGrad(
         u_filtered_atlas,
         filtered_atlas_uv_for_tile(tile_id, tile_frac),
         grad_x,
         grad_y
     );
-    if (filtered.a <= FILTERED_TILE_COLOR_ALPHA_EPSILON) {
-        return vec4(0.0, 0.0, 0.0, 1.0);
-    }
-    // The filtered atlas encodes palette-0 black as transparent coverage so
-    // minification averages only visible texels. Convert back to an opaque
-    // representative color for terrain rendering.
-    return vec4(filtered.rgb / filtered.a, 1.0);
 }
 
 void main() {
@@ -105,7 +129,8 @@ void main() {
     vec2 filtered_grad_y = filtered_atlas_grad(dFdy(tile_coord));
 
     vec4 detailed_color = texture(u_atlas, atlas_uv_for_tile(tile_id, tile_frac));
-    vec4 filtered_color = filtered_tile_color(tile_id, tile_frac, filtered_grad_x, filtered_grad_y);
+    vec4 filtered_raw = filtered_tile_color(tile_id, tile_frac, filtered_grad_x, filtered_grad_y);
+    vec4 filtered_color = decode_coverage_color(filtered_raw);
 
     // Object overlay: if an object tile is present, render its sprite on top.
     // Object tile bytes are 0-255 in the R8 texture; the actual atlas sprite
@@ -125,11 +150,13 @@ void main() {
             filtered_grad_y
         );
         // Object texels in the filtered atlas are encoded as premultiplied RGB
-        // with palette-0 black treated as transparent coverage.
-        filtered_color = vec4(
-            filtered_color.rgb * (1.0 - obj_filtered.a) + obj_filtered.rgb,
-            1.0
+        // with palette-0 black treated as transparent coverage. Preserve the
+        // combined coverage so we can restore perceptual darkness later.
+        filtered_raw = vec4(
+            filtered_raw.rgb * (1.0 - obj_filtered.a) + obj_filtered.rgb,
+            filtered_raw.a * (1.0 - obj_filtered.a) + obj_filtered.a
         );
+        filtered_color = decode_coverage_color(filtered_raw);
     }
 
     // Drive the overview transitions from source texel density rather than
@@ -142,7 +169,11 @@ void main() {
         FILTERED_BLEND_END_TEXELS_PER_PIXEL,
         atlas_texels_per_pixel
     );
-    vec4 atlas_color = mix(detailed_color, filtered_color, filtered_mix);
+    vec4 filtered_display = vec4(
+        apply_perceptual_coverage_curve(filtered_color.rgb, filtered_color.a),
+        1.0
+    );
+    vec4 atlas_color = mix(vec4(detailed_color.rgb, 1.0), filtered_display, filtered_mix);
 
     // Once several source texels map to one screen pixel, even tile-safe
     // mipmaps keep too much intra-tile detail. Blend to the per-tile low-pass
@@ -153,7 +184,15 @@ void main() {
         atlas_texels_per_pixel
     );
     vec2 lowpass_uv = clamp(v_uv, 0.5 / u_grid_size, 1.0 - 0.5 / u_grid_size);
-    frag_color = mix(atlas_color, texture(u_lowpass, lowpass_uv), lowpass_mix);
+    vec4 lowpass_color = decode_coverage_color(texture(u_lowpass, lowpass_uv));
+    vec4 lowpass_display = vec4(
+        apply_perceptual_coverage_curve(lowpass_color.rgb, lowpass_color.a),
+        1.0
+    );
+
+    // The zoom ramps decide when to switch representations; each zoomed-out
+    // representation already carries its own coverage-based brightness fix.
+    frag_color = mix(atlas_color, lowpass_display, lowpass_mix);
 
 }
 "#;
