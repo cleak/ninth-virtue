@@ -273,13 +273,15 @@ fn validate_game_data_from_mem(mem: &dyn MemoryAccess, dos_base: usize) -> bool 
     validate_game_data(&buf, 0)
 }
 
+/// Scan a candidate DOS region for a save-layout match when the IVT-based probe
+/// cannot directly confirm the live DOS base.
 fn find_game_data_base_in_region(
     mem: &dyn MemoryAccess,
     region_base: usize,
     region_size: usize,
 ) -> Option<usize> {
     let search_size = region_size.min(MAX_GAME_DATA_SCAN_SIZE);
-    if search_size <= SAVE_BASE + GAME_DATA_VALIDATION_SIZE {
+    if search_size < SAVE_BASE + GAME_DATA_VALIDATION_SIZE {
         return None;
     }
 
@@ -538,5 +540,19 @@ mod tests {
         let dos_base = find_game_data_base_in_region(&mem, region_base, region_size).unwrap();
 
         assert_eq!(dos_base, region_base + game_data_offset);
+    }
+
+    #[test]
+    fn find_game_data_base_in_region_accepts_exact_fit_window() {
+        let region_base = 0x1000;
+        let region_size = SAVE_BASE + GAME_DATA_VALIDATION_SIZE;
+        let mem = MockMemory::new(region_base + region_size);
+        let mut game_data = vec![0u8; GAME_DATA_VALIDATION_SIZE];
+        plant_game_data(&mut game_data, 0);
+        mem.set_bytes(region_base + SAVE_BASE, &game_data);
+
+        let dos_base = find_game_data_base_in_region(&mem, region_base, region_size).unwrap();
+
+        assert_eq!(dos_base, region_base);
     }
 }

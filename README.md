@@ -92,6 +92,7 @@ The redraw mechanism is runtime-only. It does not modify game files on disk.
 
 - Windows only
 - Appropriate local permissions are required to inspect and modify another process
+- The companion and target DOSBox process currently need matching bitness. A 64-bit `ninth-virtue` build can fail to inspect 32-bit DOSBox-family processes because `read_process_command_line` and the DOS memory scanner do not implement WOW64 cross-bitness handling yet.
 - The minimap path depends on locating the mounted Ultima V game directory from DOSBox configuration data
 - The project is still evolving, and the reverse-engineering notes are part of the product rather than background-only documentation
 

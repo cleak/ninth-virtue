@@ -215,6 +215,8 @@ struct CommandLineContext {
 }
 
 impl CommandLineContext {
+    /// Parse the DOSBox-family command line into the directories and config
+    /// paths used for subsequent config discovery.
     fn from_command_line(cmdline: &str) -> Self {
         Self {
             exe_dir: executable_dir_from_cmdline(cmdline),
@@ -223,6 +225,7 @@ impl CommandLineContext {
         }
     }
 
+    /// Directories DOSBox itself uses to resolve relative command-line paths.
     fn base_dirs(&self) -> Vec<PathBuf> {
         let mut dirs = Vec::new();
         if let Some(default_dir) = &self.default_dir {
@@ -234,6 +237,8 @@ impl CommandLineContext {
         dirs
     }
 
+    /// Directories that can sensibly resolve relative `mount` targets from a
+    /// DOSBox config file.
     fn mount_base_dirs(&self, conf_path: &Path) -> Vec<PathBuf> {
         let mut dirs = self.base_dirs();
         if let Some(parent) = conf_path.parent() {
@@ -243,6 +248,8 @@ impl CommandLineContext {
     }
 }
 
+/// Resolve a path relative to the DOSBox execution context before falling back
+/// to the companion's own current working directory.
 fn resolve_candidate_path(path: &Path, base_dirs: &[PathBuf]) -> Vec<PathBuf> {
     let mut resolved = Vec::new();
 
@@ -251,13 +258,11 @@ fn resolve_candidate_path(path: &Path, base_dirs: &[PathBuf]) -> Vec<PathBuf> {
         return resolved;
     }
 
-    if path.exists() {
-        push_unique_path(&mut resolved, normalize_path(path));
-    }
-
     for base in base_dirs {
         push_unique_path(&mut resolved, normalize_path(&base.join(path)));
     }
+
+    push_unique_path(&mut resolved, normalize_path(path));
 
     resolved
 }
@@ -293,6 +298,8 @@ fn normalize_path(path: &Path) -> PathBuf {
     normalized
 }
 
+/// Discover config files in the same order DOSBox-family launches are likely to
+/// consult them, keeping explicit `-conf` files ahead of defaults.
 fn discover_config_paths(context: &CommandLineContext) -> Vec<PathBuf> {
     let mut configs = Vec::new();
 
@@ -485,6 +492,42 @@ pub fn validate_game_dir(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::sync::{LazyLock, Mutex, MutexGuard};
+
+    static TEST_PROCESS_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    struct LocalAppDataGuard {
+        _lock: MutexGuard<'static, ()>,
+        previous_value: Option<OsString>,
+    }
+
+    impl LocalAppDataGuard {
+        fn set(path: &Path) -> Self {
+            let lock = TEST_PROCESS_ENV_LOCK.lock().unwrap();
+            let previous_value = std::env::var_os("LOCALAPPDATA");
+            unsafe {
+                std::env::set_var("LOCALAPPDATA", path);
+            }
+            Self {
+                _lock: lock,
+                previous_value,
+            }
+        }
+    }
+
+    impl Drop for LocalAppDataGuard {
+        fn drop(&mut self) {
+            match self.previous_value.take() {
+                Some(value) => unsafe {
+                    std::env::set_var("LOCALAPPDATA", value);
+                },
+                None => unsafe {
+                    std::env::remove_var("LOCALAPPDATA");
+                },
+            }
+        }
+    }
 
     #[test]
     fn parse_conf_path_quoted() {
@@ -602,10 +645,7 @@ mod tests {
         std::fs::write(&portable_conf, "").unwrap();
         std::fs::write(&user_conf, "").unwrap();
 
-        let old_local_app_data = std::env::var_os("LOCALAPPDATA");
-        unsafe {
-            std::env::set_var("LOCALAPPDATA", &local_app_data);
-        }
+        let local_app_data_guard = LocalAppDataGuard::set(&local_app_data);
 
         let cmdline = format!(
             r#""C:\Program Files\DOSBox-X\dosbox-x.exe" -conf "{}" -defaultdir "{}""#,
@@ -614,21 +654,27 @@ mod tests {
         );
         let discovered = discover_config_paths(&CommandLineContext::from_command_line(&cmdline));
 
-        if let Some(value) = old_local_app_data {
-            unsafe {
-                std::env::set_var("LOCALAPPDATA", value);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var("LOCALAPPDATA");
-            }
-        }
-
+        drop(local_app_data_guard);
         std::fs::remove_dir_all(&temp_root).unwrap();
 
         assert_eq!(discovered[0], explicit);
         assert!(discovered.contains(&portable_conf));
         assert!(discovered.contains(&user_conf));
+    }
+
+    #[test]
+    fn resolve_candidate_path_prioritizes_dosbox_base_dirs() {
+        let base_dir = PathBuf::from(r"C:\DOSBox-X");
+        let resolved = resolve_candidate_path(
+            Path::new("dosboxULTIMA5.conf"),
+            std::slice::from_ref(&base_dir),
+        );
+
+        assert_eq!(
+            resolved[0],
+            PathBuf::from(r"C:\DOSBox-X\dosboxULTIMA5.conf")
+        );
+        assert_eq!(resolved[1], PathBuf::from("dosboxULTIMA5.conf"));
     }
 
     #[test]

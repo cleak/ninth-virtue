@@ -117,6 +117,8 @@ impl UltimaCompanion {
         app
     }
 
+    /// Auto-attach when there is a single candidate or exactly one confirmed
+    /// Ultima V session among multiple DOSBox-family processes.
     fn auto_attach_preferred_process(&mut self) {
         if self.suppress_auto_attach || self.attached.is_some() {
             return;
@@ -134,6 +136,8 @@ impl UltimaCompanion {
         self.attach(pid);
     }
 
+    /// Return the sole confirmed Ultima V process, or `None` when zero or
+    /// multiple DOSBox-family processes validate as live game sessions.
     fn unique_confirmed_process_pid(&self) -> Option<u32> {
         let mut confirmed_pid = None;
 
@@ -155,6 +159,8 @@ impl UltimaCompanion {
         confirmed_pid
     }
 
+    /// Refresh the visible DOSBox-family process list and keep the current
+    /// selection stable when the selected PID still exists.
     fn scan_processes(&mut self) {
         match process::list_dosbox_processes() {
             Ok(list) => {
@@ -177,6 +183,7 @@ impl UltimaCompanion {
         self.last_process_scan = Instant::now();
     }
 
+    /// Clear the current attachment state so a confirmed replacement can take over.
     fn prepare_for_attach(&mut self) {
         if let (Some(attached), Some(state)) = (&self.attached, &self.patch_state) {
             injection::remove_patch(&attached.process.memory, state);
@@ -186,78 +193,75 @@ impl UltimaCompanion {
     }
 
     fn attach(&mut self, pid: u32) {
+        let had_attachment = self.attached.is_some();
+        let (proc, scan_result) = match process::attach(pid)
+            .and_then(|proc| scanner::find_dos_base(&proc.memory).map(|scan| (proc, scan)))
+        {
+            Ok(result) => result,
+            Err(e) => {
+                if had_attachment {
+                    self.status_msg =
+                        format!("Retained current session; attach to PID {pid} failed: {e}");
+                } else {
+                    self.status_msg = format!("Attach failed: {e}");
+                }
+                return;
+            }
+        };
+
         self.prepare_for_attach();
 
-        match process::attach(pid) {
-            Ok(proc) => {
-                let (dos_base, game_confirmed) = match scanner::find_dos_base(&proc.memory) {
-                    Ok(result) => (Some(result.dos_base), result.game_confirmed),
-                    Err(e) => {
-                        self.status_msg = format!("Attached, scan failed: {e}");
-                        (None, false)
-                    }
-                };
+        let dos_base = Some(scan_result.dos_base);
+        let game_confirmed = scan_result.game_confirmed;
+        if game_confirmed {
+            self.status_msg = format!("Connected to {} (PID {})", proc.name, proc.pid,);
+        } else {
+            self.status_msg = "Waiting for game to load...".to_string();
+        }
 
-                if dos_base.is_some() {
-                    if game_confirmed {
-                        self.status_msg = format!("Connected to {} (PID {})", proc.name, proc.pid,);
-                    } else {
-                        self.status_msg = "Waiting for game to load...".to_string();
-                    }
-                }
-
-                // Try to locate game data files and load tile atlas + world map
-                self.tile_atlas_error = None;
-                match config::find_game_directory(proc.memory.handle()) {
-                    Ok(dir) => {
-                        match TileAtlas::load(&dir) {
-                            Ok(atlas) => {
-                                self.tile_atlas = Some(atlas);
-                                // Only load the world map if the atlas succeeded
-                                match WorldMap::load(&dir) {
-                                    Ok(wm) => self.world_map = Some(wm),
-                                    Err(e) => {
-                                        self.status_msg = format!(
-                                            "World map failed: {e} (dir: {})",
-                                            dir.display()
-                                        );
-                                    }
-                                }
-                            }
+        // Try to locate game data files and load tile atlas + world map.
+        self.tile_atlas_error = None;
+        match config::find_game_directory(proc.memory.handle()) {
+            Ok(dir) => {
+                match TileAtlas::load(&dir) {
+                    Ok(atlas) => {
+                        self.tile_atlas = Some(atlas);
+                        // Only load the world map if the atlas succeeded.
+                        match WorldMap::load(&dir) {
+                            Ok(wm) => self.world_map = Some(wm),
                             Err(e) => {
-                                let load_error = format!(
-                                    "Failed to load tile atlas from {}: {e}",
-                                    dir.display()
-                                );
-                                self.status_msg = load_error.clone();
-                                self.tile_atlas_error = Some(load_error);
+                                self.status_msg =
+                                    format!("World map failed: {e} (dir: {})", dir.display());
                             }
                         }
-                        self.game_dir = Some(dir);
                     }
                     Err(e) => {
-                        let game_dir_error = format!("Game dir not found: {e}");
-                        self.status_msg = game_dir_error.clone();
-                        self.tile_atlas_error = Some(game_dir_error);
+                        let load_error =
+                            format!("Failed to load tile atlas from {}: {e}", dir.display());
+                        self.status_msg = load_error.clone();
+                        self.tile_atlas_error = Some(load_error);
                     }
                 }
-
-                self.selected_pid = Some(pid);
-                self.try_acquire_audio(pid);
-                self.attached = Some(AttachedProcess {
-                    process: proc,
-                    dos_base,
-                    game_confirmed,
-                });
-                self.last_rescan = Instant::now();
-
-                if game_confirmed {
-                    self.sync_confirmed_game_state();
-                }
+                self.game_dir = Some(dir);
             }
             Err(e) => {
-                self.status_msg = format!("Attach failed: {e}");
+                let game_dir_error = format!("Game dir not found: {e}");
+                self.status_msg = game_dir_error.clone();
+                self.tile_atlas_error = Some(game_dir_error);
             }
+        }
+
+        self.selected_pid = Some(pid);
+        self.try_acquire_audio(pid);
+        self.attached = Some(AttachedProcess {
+            process: proc,
+            dos_base,
+            game_confirmed,
+        });
+        self.last_rescan = Instant::now();
+
+        if game_confirmed {
+            self.sync_confirmed_game_state();
         }
     }
 
@@ -370,6 +374,8 @@ impl UltimaCompanion {
         self.last_rescan = Instant::now();
     }
 
+    /// Re-run DOS memory scans across the process list and switch to a newly
+    /// confirmed game session when it is uniquely identifiable.
     fn try_promote_to_confirmed_process(&mut self) {
         let current_pid = self.attached.as_ref().map(|attached| attached.process.pid);
         self.scan_processes();
