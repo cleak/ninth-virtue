@@ -206,8 +206,7 @@ impl UltimaCompanion {
                 self.last_rescan = Instant::now();
 
                 if game_confirmed {
-                    self.refresh_game_state();
-                    self.try_apply_patch();
+                    self.sync_confirmed_game_state();
                 }
             }
             Err(e) => {
@@ -268,7 +267,14 @@ impl UltimaCompanion {
         }
     }
 
-    /// Try to find DOSBox's audio session. Non-fatal — the audio controls
+    fn sync_confirmed_game_state(&mut self) {
+        // Install the redraw hook before the first live refresh so any lock
+        // writes during that refresh can trigger an immediate in-game redraw.
+        self.try_apply_patch();
+        self.refresh_game_state();
+    }
+
+    /// Try to find DOSBox's audio session. Non-fatal - the audio controls
     /// are simply disabled until we find the session.
     fn try_acquire_audio(&mut self, pid: u32) {
         if self.audio_session.is_some() {
@@ -454,8 +460,7 @@ impl eframe::App for UltimaCompanion {
                 if self.last_rescan.elapsed() >= RESCAN_INTERVAL {
                     self.rescan_memory();
                     if self.attached.as_ref().is_some_and(|a| a.game_confirmed) {
-                        self.refresh_game_state();
-                        self.try_apply_patch();
+                        self.sync_confirmed_game_state();
                     }
                 }
                 ctx.request_repaint_after(RESCAN_INTERVAL);
