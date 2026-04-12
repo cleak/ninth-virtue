@@ -113,11 +113,46 @@ impl UltimaCompanion {
         app.minimap.load_persistent_preferences();
         // Scan immediately on startup so we connect without delay.
         app.scan_processes();
-        if app.process_list.len() == 1 {
-            let pid = app.process_list[0].0;
-            app.attach(pid);
-        }
+        app.auto_attach_preferred_process();
         app
+    }
+
+    fn auto_attach_preferred_process(&mut self) {
+        if self.suppress_auto_attach || self.attached.is_some() {
+            return;
+        }
+
+        let pid = if self.process_list.len() == 1 {
+            self.process_list[0].0
+        } else {
+            let Some(pid) = self.unique_confirmed_process_pid() else {
+                return;
+            };
+            pid
+        };
+
+        self.attach(pid);
+    }
+
+    fn unique_confirmed_process_pid(&self) -> Option<u32> {
+        let mut confirmed_pid = None;
+
+        for (pid, _) in &self.process_list {
+            let Ok(proc) = process::attach(*pid) else {
+                continue;
+            };
+            let Ok(result) = scanner::find_dos_base(&proc.memory) else {
+                continue;
+            };
+            if !result.game_confirmed {
+                continue;
+            }
+            if confirmed_pid.replace(*pid).is_some() {
+                return None;
+            }
+        }
+
+        confirmed_pid
     }
 
     fn scan_processes(&mut self) {
@@ -142,7 +177,17 @@ impl UltimaCompanion {
         self.last_process_scan = Instant::now();
     }
 
+    fn prepare_for_attach(&mut self) {
+        if let (Some(attached), Some(state)) = (&self.attached, &self.patch_state) {
+            injection::remove_patch(&attached.process.memory, state);
+        }
+        self.patch_state = None;
+        self.clear_attached_state("Connecting...");
+    }
+
     fn attach(&mut self, pid: u32) {
+        self.prepare_for_attach();
+
         match process::attach(pid) {
             Ok(proc) => {
                 let (dos_base, game_confirmed) = match scanner::find_dos_base(&proc.memory) {
@@ -325,6 +370,24 @@ impl UltimaCompanion {
         self.last_rescan = Instant::now();
     }
 
+    fn try_promote_to_confirmed_process(&mut self) {
+        let current_pid = self.attached.as_ref().map(|attached| attached.process.pid);
+        self.scan_processes();
+
+        let Some(pid) = self.unique_confirmed_process_pid() else {
+            return;
+        };
+
+        if current_pid != Some(pid)
+            || self
+                .attached
+                .as_ref()
+                .is_some_and(|attached| !attached.game_confirmed)
+        {
+            self.attach(pid);
+        }
+    }
+
     fn refresh_game_state(&mut self) {
         let Some(ref attached) = self.attached else {
             return;
@@ -498,11 +561,7 @@ impl eframe::App for UltimaCompanion {
             // Periodically scan for DOSBox processes.
             if self.last_process_scan.elapsed() >= PROCESS_SCAN_INTERVAL {
                 self.scan_processes();
-                // Auto-attach if exactly one process and not suppressed.
-                if !self.suppress_auto_attach && self.process_list.len() == 1 {
-                    let pid = self.process_list[0].0;
-                    self.attach(pid);
-                }
+                self.auto_attach_preferred_process();
             }
             ctx.request_repaint_after(PROCESS_SCAN_INTERVAL);
         } else if !self.attached.as_ref().unwrap().process.is_alive() {
@@ -517,6 +576,11 @@ impl eframe::App for UltimaCompanion {
                     self.rescan_memory();
                     if self.attached.as_ref().is_some_and(|a| a.game_confirmed) {
                         self.sync_confirmed_game_state();
+                    } else {
+                        self.try_promote_to_confirmed_process();
+                        if self.attached.as_ref().is_some_and(|a| a.game_confirmed) {
+                            self.sync_confirmed_game_state();
+                        }
                     }
                 }
                 ctx.request_repaint_after(RESCAN_INTERVAL);

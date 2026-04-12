@@ -2,13 +2,13 @@
 
 The Ninth Virtue: Convenience.
 
-`ninth-virtue` is an unofficial Windows companion app for Ultima V that attaches to a live DOSBox or DOSBox Staging session and turns the game's memory into a second-screen control panel. It surfaces party state, quest progress, map data, and a handful of recovery actions without replacing the original game client.
+`ninth-virtue` is an unofficial Windows companion app for Ultima V that attaches to a live DOSBox, DOSBox Staging, or DOSBox-X session and turns the game's memory into a second-screen control panel. It surfaces party state, quest progress, map data, and a handful of recovery actions without replacing the original game client.
 
 This is not a ROM hack, not a save-file editor, and not a replacement engine. It reads and writes known Ultima V runtime structures inside the emulator process while the game is running.
 
 ## What It Does
 
-- Attaches to a running DOSBox or DOSBox Staging process on Windows
+- Attaches to a running DOSBox, DOSBox Staging, or DOSBox-X process on Windows
 - Locates Ultima V's emulated DOS memory automatically
 - Reads party state, inventory, shrine quest progress, map state, and object data
 - Provides quick recovery actions such as healing, curing poison, resurrecting the party, refilling arrows, and topping off supplies
@@ -26,7 +26,7 @@ Main window attached to a live Ultima V session, showing the party panel, quick 
 
 ## Scope And Disclaimers
 
-- `ninth-virtue` is an unofficial fan project. It is not affiliated with or endorsed by the rights holders of Ultima, DOSBox, or DOSBox Staging.
+- `ninth-virtue` is an unofficial fan project. It is not affiliated with or endorsed by the rights holders of Ultima, DOSBox, DOSBox Staging, or DOSBox-X.
 - You must supply your own legally obtained copy of Ultima V and your own emulator setup. This repository does not include game data, ROMs, or extracted Ultima V asset files. The bundled screenshot is documentation for the companion UI, not a redistributable game data set.
 - The app reads and writes another local process's memory. Use it at your own risk, and keep backups of your saves before relying on live edits.
 - This is a single-player quality-of-life and reverse-engineering tool. It is not intended as an anti-cheat bypass, multiplayer tool, or general-purpose memory editor.
@@ -41,7 +41,7 @@ For reverse engineers, it is also a concrete example of process attachment, emul
 
 - Windows
 - Rust 1.92+ toolchain
-- A running DOSBox or DOSBox Staging process
+- A running DOSBox, DOSBox Staging, or DOSBox-X process
 - Ultima V already available inside that process
 
 ## Running It
@@ -54,7 +54,7 @@ cargo run --release
 
 Typical workflow:
 
-1. Launch DOSBox or DOSBox Staging with Ultima V.
+1. Launch DOSBox, DOSBox Staging, or DOSBox-X with Ultima V.
 2. Load into the game.
 3. Start `ninth-virtue` (you can also run `ninth-virtue` first if you'd rather).
 4. If only one DOSBox process is available, the app will try to attach automatically.
@@ -92,7 +92,7 @@ The redraw mechanism is runtime-only. It does not modify game files on disk.
 
 - Windows only
 - Appropriate local permissions are required to inspect and modify another process
-- The minimap path depends on locating the mounted Ultima V game directory from the DOSBox configuration
+- The minimap path depends on locating the mounted Ultima V game directory from DOSBox configuration data
 - The project is still evolving, and the reverse-engineering notes are part of the product rather than background-only documentation
 
 ## Project Structure
