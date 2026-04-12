@@ -100,6 +100,7 @@ impl UltimaCompanion {
             audio_volume: 1.0,
             audio_muted: false,
         };
+        app.minimap.load_persistent_preferences();
         // Scan immediately on startup so we connect without delay.
         app.scan_processes();
         if app.process_list.len() == 1 {

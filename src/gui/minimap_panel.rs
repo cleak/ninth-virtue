@@ -1,11 +1,14 @@
+use std::fs;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use egui::epaint::PaintCallbackInfo;
-use egui::{Color32, FontId, Pos2, Rect, Stroke, vec2};
+use egui::{Color32, FontId, Pos2, Rect, Stroke, StrokeKind, vec2};
 
-use crate::game::map::{LocationType, MapState, ObjectEntry, TileGridEncoding};
+use crate::game::map::{CardinalDirection, LocationType, MapState, ObjectEntry, TileGridEncoding};
 use crate::game::offsets::{
     COMBAT_TERRAIN_HEIGHT, COMBAT_TERRAIN_LEN, COMBAT_TERRAIN_STRIDE, COMBAT_TERRAIN_WIDTH,
+    DUNGEON_LEVEL_HEIGHT, DUNGEON_LEVEL_LEN, DUNGEON_LEVEL_WIDTH,
 };
 use crate::game::world_map::{WorldLabelCategory, WorldLocation, WorldMap};
 use crate::tiles::atlas::{TILE_COUNT, TILE_SIZE, TileAtlas};
@@ -21,6 +24,46 @@ const PLAYER_MARKER_MIN_RADIUS: f32 = 4.0;
 const PLAYER_MARKER_TILE_MARGIN_PX: f32 = 3.0;
 const PLAYER_MARKER_FILL_TILE_THRESHOLD_PX: f32 = 6.0;
 const PLAYER_MARKER_COLOR: Color32 = Color32::from_rgb(255, 230, 128);
+const PLAYER_FACING_ARROW_MIN_LEN: f32 = 10.0;
+const PLAYER_FACING_ARROW_EXTRA_LEN: f32 = 7.0;
+const PLAYER_FACING_ARROW_WIDTH: f32 = 6.0;
+const DUNGEON_VIEW_PREF_FILE: &str = "minimap_dungeon_view.txt";
+const DUNGEON_CORNER_VIEW_PREF_FILE: &str = "minimap_dungeon_corner_view.txt";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DungeonPrimaryView {
+    Centered,
+    Fixed,
+}
+
+impl Default for DungeonPrimaryView {
+    fn default() -> Self {
+        Self::Centered
+    }
+}
+
+impl DungeonPrimaryView {
+    fn swapped(self) -> Self {
+        match self {
+            Self::Centered => Self::Fixed,
+            Self::Fixed => Self::Centered,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Centered => "centered",
+            Self::Fixed => "fixed",
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Centered => "Centered Main",
+            Self::Fixed => "Fixed Main",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct PlayerMarkerStyle {
@@ -120,6 +163,8 @@ pub struct MinimapState {
     show_labels: bool,
     label_filters: LabelFilters,
     last_grid_key: Option<GridCacheKey>,
+    dungeon_primary_view: DungeonPrimaryView,
+    show_dungeon_corner_view: bool,
 }
 
 impl Default for MinimapState {
@@ -141,6 +186,8 @@ impl Default for MinimapState {
             show_labels: true,
             label_filters: LabelFilters::default(),
             last_grid_key: None,
+            dungeon_primary_view: DungeonPrimaryView::default(),
+            show_dungeon_corner_view: true,
         }
     }
 }
@@ -149,6 +196,29 @@ impl MinimapState {
     /// Construct an empty minimap state with default zoom and label filters.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn load_persistent_preferences(&mut self) {
+        self.dungeon_primary_view = load_dungeon_primary_view();
+        self.show_dungeon_corner_view = load_dungeon_corner_view();
+    }
+
+    pub fn dungeon_primary_view(&self) -> DungeonPrimaryView {
+        self.dungeon_primary_view
+    }
+
+    pub fn swap_dungeon_primary_view(&mut self) {
+        self.dungeon_primary_view = self.dungeon_primary_view.swapped();
+        save_dungeon_primary_view(self.dungeon_primary_view);
+    }
+
+    pub fn show_dungeon_corner_view(&self) -> bool {
+        self.show_dungeon_corner_view
+    }
+
+    pub fn set_show_dungeon_corner_view(&mut self, visible: bool) {
+        self.show_dungeon_corner_view = visible;
+        save_dungeon_corner_view(visible);
     }
 
     /// Clear cached map data so the next loaded snapshot forces a fresh upload.
@@ -176,23 +246,13 @@ pub fn show(
     atlas: &TileAtlas,
     world_map: Option<&WorldMap>,
 ) {
-    let Some(ref map) = state.map else {
+    let Some(map) = state.map.clone() else {
         ui.centered_and_justified(|ui| {
             ui.label("Waiting for map data...");
         });
         return;
     };
-
-    // Capture raw atlas data once for lazy GPU upload
-    if state.raw_atlas.is_none() {
-        state.raw_atlas = Some(Arc::new(atlas.raw_data().to_vec()));
-    }
-    if state.tile_lowpass_lut.is_none() {
-        state.tile_lowpass_lut = state
-            .raw_atlas
-            .as_ref()
-            .map(|raw_atlas| build_tile_lowpass_lut(raw_atlas.as_slice()));
-    }
+    let is_dungeon = matches!(map.location, LocationType::Dungeon(_));
 
     // Header
     let header = if map.z == 0xFF {
@@ -204,25 +264,42 @@ pub fn show(
 
     ui.vertical(|ui| {
         // Keep the changing coordinate text on its own line so movement cannot
-        // reflow the zoom controls and resize the map panel.
+        // reflow the controls row and resize the map panel.
         ui.add(egui::Label::new(&header).truncate());
 
-        ui.horizontal(|ui| {
-            if ui.small_button("\u{2796}").clicked() {
-                state.zoom = (state.zoom * 4 / 3).min(ZOOM_MAX);
+        ui.horizontal_wrapped(|ui| {
+            if is_dungeon {
+                ui.label("8x8 dungeon grid");
+                ui.separator();
+                ui.label(state.dungeon_primary_view().title());
+                if ui.small_button("Swap Views").clicked() {
+                    state.swap_dungeon_primary_view();
+                }
+                ui.separator();
+                let mut show_corner_view = state.show_dungeon_corner_view();
+                if ui
+                    .checkbox(&mut show_corner_view, "Show Orientation Inset")
+                    .changed()
+                {
+                    state.set_show_dungeon_corner_view(show_corner_view);
+                }
+            } else {
+                if ui.small_button("\u{2796}").clicked() {
+                    state.zoom = (state.zoom * 4 / 3).min(ZOOM_MAX);
+                }
+                let mut zoom_f = state.zoom as f64;
+                let slider = egui::Slider::new(&mut zoom_f, ZOOM_MAX as f64..=ZOOM_MIN as f64)
+                    .logarithmic(true)
+                    .show_value(false)
+                    .clamping(egui::SliderClamping::Always);
+                if ui.add(slider).changed() {
+                    state.zoom = zoom_f as usize;
+                }
+                if ui.small_button("\u{2795}").clicked() {
+                    state.zoom = (state.zoom * 3 / 4).max(ZOOM_MIN);
+                }
+                ui.label(format!("{}x{}", state.zoom, state.zoom));
             }
-            let mut zoom_f = state.zoom as f64;
-            let slider = egui::Slider::new(&mut zoom_f, ZOOM_MAX as f64..=ZOOM_MIN as f64)
-                .logarithmic(true)
-                .show_value(false)
-                .clamping(egui::SliderClamping::Always);
-            if ui.add(slider).changed() {
-                state.zoom = zoom_f as usize;
-            }
-            if ui.small_button("\u{2795}").clicked() {
-                state.zoom = (state.zoom * 3 / 4).max(ZOOM_MIN);
-            }
-            ui.label(format!("{}x{}", state.zoom, state.zoom));
         });
 
         if is_overworld && world_map.is_some() {
@@ -239,6 +316,22 @@ pub fn show(
             });
         }
     });
+
+    if is_dungeon {
+        show_dungeon_map(ui, state, &map);
+        return;
+    }
+
+    // Capture raw atlas data once for lazy GPU upload
+    if state.raw_atlas.is_none() {
+        state.raw_atlas = Some(Arc::new(atlas.raw_data().to_vec()));
+    }
+    if state.tile_lowpass_lut.is_none() {
+        state.tile_lowpass_lut = state
+            .raw_atlas
+            .as_ref()
+            .map(|raw_atlas| build_tile_lowpass_lut(raw_atlas.as_slice()));
+    }
 
     let zoom = state.zoom;
     let cx = map.x;
@@ -267,11 +360,11 @@ pub fn show(
                 let half = zoom as f32 / 2.0;
                 (grid, zoom as u32, zoom as u32, [half, half])
             } else {
-                extract_local_scene_grid(map)
+                extract_local_scene_grid(&map)
             };
 
         let objects_data =
-            build_objects_overlay(&map.objects, grid_w as usize, grid_h as usize, map);
+            build_objects_overlay(&map.objects, grid_w as usize, grid_h as usize, &map);
         let lowpass_data = build_lowpass_map(
             &grid_data,
             &objects_data,
@@ -347,7 +440,7 @@ pub fn show(
             let gpu = state.gpu.lock().unwrap();
             (gpu.grid_dims, gpu.player_tile)
         };
-        paint_player_marker(ui, rect, grid_dims, player_tile);
+        paint_player_marker(ui, rect, grid_dims, player_tile, None);
     });
 }
 
@@ -402,11 +495,18 @@ fn extract_local_scene_grid(map: &MapState) -> (Vec<u8>, u32, u32, [f32; 2]) {
             let pby = map.y.wrapping_sub(map.scroll_y) as f32;
             (linearize_chunked_grid(&map.tiles), 32, 32, [pbx, pby])
         }
-        TileGridEncoding::RowMajor32 => {
-            let pbx = map.x.wrapping_sub(map.scroll_x) as f32;
-            let pby = map.y.wrapping_sub(map.scroll_y) as f32;
-            (extract_row_major_grid(&map.tiles), 32, 32, [pbx, pby])
-        }
+        TileGridEncoding::RowMajor32 => (
+            extract_row_major_grid(&map.tiles),
+            32,
+            32,
+            local_scene_player_tile(map),
+        ),
+        TileGridEncoding::Dungeon8x8 => (
+            extract_dungeon_grid(&map.tiles),
+            DUNGEON_LEVEL_WIDTH as u32,
+            DUNGEON_LEVEL_HEIGHT as u32,
+            local_scene_player_tile(map),
+        ),
         TileGridEncoding::Combat11x11Stride32 => {
             debug_assert!(
                 map.combat_tiles.is_some(),
@@ -423,6 +523,564 @@ fn extract_local_scene_grid(map: &MapState) -> (Vec<u8>, u32, u32, [f32; 2]) {
             )
         }
     }
+}
+
+fn extract_dungeon_grid(tiles: &[u8; 1024]) -> Vec<u8> {
+    tiles[..DUNGEON_LEVEL_LEN].to_vec()
+}
+
+fn local_scene_player_tile(map: &MapState) -> [f32; 2] {
+    match map.location {
+        // Dungeon mode keeps the active local map in a dedicated runtime buffer
+        // while scroll_x/scroll_y still reflect the entrance chunk in Britannia.
+        LocationType::Dungeon(_) | LocationType::Combat(_) => [map.x as f32, map.y as f32],
+        _ => [
+            map.x.wrapping_sub(map.scroll_x) as f32,
+            map.y.wrapping_sub(map.scroll_y) as f32,
+        ],
+    }
+}
+
+fn show_dungeon_map(ui: &mut egui::Ui, state: &mut MinimapState, map: &MapState) {
+    let avail = ui.available_size();
+    let side = avail.x.min(avail.y);
+
+    ui.vertical_centered(|ui| {
+        let (rect, _response) =
+            ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
+        let painter = ui.painter_at(rect);
+        let grid = extract_dungeon_grid(&map.tiles);
+        let panel_rounding = 10.0;
+        let map_rect = rect.shrink((side * 0.014).max(4.0));
+        let player_tile = local_scene_player_tile(map);
+
+        painter.rect_filled(rect, panel_rounding, Color32::from_rgb(7, 10, 13));
+        painter.rect_stroke(
+            rect,
+            panel_rounding,
+            Stroke::new(1.0, Color32::from_rgb(32, 38, 46)),
+            StrokeKind::Inside,
+        );
+        painter.rect_filled(map_rect, 7.0, Color32::from_rgb(12, 16, 20));
+        painter.rect_stroke(
+            map_rect,
+            7.0,
+            Stroke::new(1.0, Color32::from_rgb(18, 24, 30)),
+            StrokeKind::Inside,
+        );
+        let map_painter = ui.painter_at(map_rect);
+        match state.dungeon_primary_view() {
+            DungeonPrimaryView::Centered => {
+                paint_centered_dungeon_cells(&map_painter, map_rect, &grid, player_tile);
+                if state.show_dungeon_corner_view() {
+                    paint_dungeon_overview_inset(
+                        ui,
+                        map_rect,
+                        &grid,
+                        player_tile,
+                        map.dungeon_facing,
+                        DungeonPrimaryView::Fixed,
+                    );
+                }
+                paint_centered_dungeon_player_marker(ui, map_rect, map.dungeon_facing);
+            }
+            DungeonPrimaryView::Fixed => {
+                paint_fixed_dungeon_cells(&map_painter, map_rect, &grid);
+                if state.show_dungeon_corner_view() {
+                    paint_dungeon_overview_inset(
+                        ui,
+                        map_rect,
+                        &grid,
+                        player_tile,
+                        map.dungeon_facing,
+                        DungeonPrimaryView::Centered,
+                    );
+                }
+                paint_player_marker(
+                    ui,
+                    map_rect,
+                    (DUNGEON_LEVEL_WIDTH as u32, DUNGEON_LEVEL_HEIGHT as u32),
+                    player_tile,
+                    map.dungeon_facing,
+                );
+            }
+        }
+    });
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DungeonCellKind {
+    Corridor,
+    Room,
+    Wall,
+    WallAlt,
+    SecretDoor,
+    Door,
+    Ladder { up: bool, down: bool },
+}
+
+fn classify_dungeon_cell(code: u8) -> DungeonCellKind {
+    match code >> 4 {
+        0x1 => DungeonCellKind::Ladder {
+            up: true,
+            down: false,
+        },
+        0x2 => DungeonCellKind::Ladder {
+            up: false,
+            down: true,
+        },
+        0x3 => DungeonCellKind::Ladder {
+            up: true,
+            down: true,
+        },
+        0xA | 0xF => DungeonCellKind::Room,
+        0xB => DungeonCellKind::Wall,
+        0xC => DungeonCellKind::WallAlt,
+        0xD => DungeonCellKind::SecretDoor,
+        0xE => DungeonCellKind::Door,
+        _ => DungeonCellKind::Corridor,
+    }
+}
+
+fn paint_centered_dungeon_cells(
+    painter: &egui::Painter,
+    rect: Rect,
+    grid: &[u8],
+    player_tile: [f32; 2],
+) {
+    for repeat_y in -1..=1 {
+        for repeat_x in -1..=1 {
+            for y in 0..DUNGEON_LEVEL_HEIGHT {
+                for x in 0..DUNGEON_LEVEL_WIDTH {
+                    let idx = y * DUNGEON_LEVEL_WIDTH + x;
+                    let world_tile = [
+                        x as f32 + repeat_x as f32 * DUNGEON_LEVEL_WIDTH as f32,
+                        y as f32 + repeat_y as f32 * DUNGEON_LEVEL_HEIGHT as f32,
+                    ];
+                    let cell = centered_dungeon_tile_rect(rect, player_tile, world_tile);
+                    if !cell.intersects(rect) {
+                        continue;
+                    }
+                    paint_dungeon_cell(painter, cell, classify_dungeon_cell(grid[idx]));
+                }
+            }
+        }
+    }
+}
+
+fn paint_fixed_dungeon_cells(painter: &egui::Painter, rect: Rect, grid: &[u8]) {
+    for y in 0..DUNGEON_LEVEL_HEIGHT {
+        for x in 0..DUNGEON_LEVEL_WIDTH {
+            let idx = y * DUNGEON_LEVEL_WIDTH + x;
+            let cell = fixed_dungeon_tile_rect(rect, x, y);
+            paint_dungeon_cell(painter, cell, classify_dungeon_cell(grid[idx]));
+        }
+    }
+}
+
+fn fixed_dungeon_tile_rect(rect: Rect, x: usize, y: usize) -> Rect {
+    let cell_w = rect.width() / DUNGEON_LEVEL_WIDTH as f32;
+    let cell_h = rect.height() / DUNGEON_LEVEL_HEIGHT as f32;
+    Rect::from_min_max(
+        Pos2::new(
+            rect.left() + x as f32 * cell_w,
+            rect.top() + y as f32 * cell_h,
+        ),
+        Pos2::new(
+            rect.left() + (x + 1) as f32 * cell_w,
+            rect.top() + (y + 1) as f32 * cell_h,
+        ),
+    )
+}
+
+fn centered_dungeon_tile_rect(rect: Rect, player_tile: [f32; 2], world_tile: [f32; 2]) -> Rect {
+    let cell_w = rect.width() / DUNGEON_LEVEL_WIDTH as f32;
+    let cell_h = rect.height() / DUNGEON_LEVEL_HEIGHT as f32;
+    let center = Pos2::new(
+        rect.center().x + (world_tile[0] - player_tile[0]) * cell_w,
+        rect.center().y + (world_tile[1] - player_tile[1]) * cell_h,
+    );
+    Rect::from_center_size(center, vec2(cell_w, cell_h))
+}
+
+fn paint_dungeon_overview_inset(
+    ui: &egui::Ui,
+    map_rect: Rect,
+    grid: &[u8],
+    player_tile: [f32; 2],
+    facing: Option<CardinalDirection>,
+    inset_view: DungeonPrimaryView,
+) {
+    let frame = dungeon_overview_rect(map_rect);
+    let panel = ui.painter_at(frame);
+    let shadow = frame.translate(vec2(0.0, 3.0));
+    panel.rect_filled(shadow, 9.0, Color32::from_black_alpha(88));
+    panel.rect_filled(frame, 9.0, Color32::from_rgb(11, 15, 20));
+    panel.rect_stroke(
+        frame,
+        9.0,
+        Stroke::new(1.0, Color32::from_rgb(38, 46, 56)),
+        StrokeKind::Inside,
+    );
+
+    let grid_rect = frame.shrink(frame.width() * 0.075);
+    panel.rect_filled(grid_rect, 6.0, Color32::from_rgb(9, 12, 16));
+    panel.rect_stroke(
+        grid_rect,
+        6.0,
+        Stroke::new(1.0, Color32::from_rgb(24, 30, 38)),
+        StrokeKind::Inside,
+    );
+
+    match inset_view {
+        DungeonPrimaryView::Fixed => {
+            paint_fixed_dungeon_cells(&panel, grid_rect, grid);
+            paint_player_marker(
+                ui,
+                grid_rect,
+                (DUNGEON_LEVEL_WIDTH as u32, DUNGEON_LEVEL_HEIGHT as u32),
+                player_tile,
+                facing,
+            );
+        }
+        DungeonPrimaryView::Centered => {
+            paint_centered_dungeon_cells(&panel, grid_rect, grid, player_tile);
+            paint_centered_dungeon_player_marker(ui, grid_rect, facing);
+        }
+    }
+}
+
+fn dungeon_overview_rect(map_rect: Rect) -> Rect {
+    let margin = (map_rect.width() * 0.028).clamp(2.0, 8.0);
+    let available_side = (map_rect.width() - 2.0 * margin)
+        .min(map_rect.height() - 2.0 * margin)
+        .max(8.0);
+    let preferred_side = (map_rect.width() * 0.20).max(8.0);
+    let side = preferred_side.min(available_side);
+    Rect::from_min_size(
+        Pos2::new(map_rect.right() - margin - side, map_rect.top() + margin),
+        vec2(side, side),
+    )
+}
+
+fn parse_dungeon_primary_view(value: &str) -> Option<DungeonPrimaryView> {
+    match value.trim() {
+        "centered" => Some(DungeonPrimaryView::Centered),
+        "fixed" => Some(DungeonPrimaryView::Fixed),
+        _ => None,
+    }
+}
+
+fn load_dungeon_primary_view() -> DungeonPrimaryView {
+    minimap_pref_path()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|value| parse_dungeon_primary_view(&value))
+        .unwrap_or_default()
+}
+
+fn save_dungeon_primary_view(view: DungeonPrimaryView) {
+    let Some(path) = minimap_pref_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(path, view.as_str());
+}
+
+fn load_dungeon_corner_view() -> bool {
+    bool_pref_path(DUNGEON_CORNER_VIEW_PREF_FILE)
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|value| parse_bool_pref(&value))
+        .unwrap_or(true)
+}
+
+fn save_dungeon_corner_view(visible: bool) {
+    let Some(path) = bool_pref_path(DUNGEON_CORNER_VIEW_PREF_FILE) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(path, if visible { "true" } else { "false" });
+}
+
+fn parse_bool_pref(value: &str) -> Option<bool> {
+    match value.trim() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+fn minimap_pref_path() -> Option<PathBuf> {
+    bool_pref_path(DUNGEON_VIEW_PREF_FILE)
+}
+
+fn bool_pref_path(file_name: &str) -> Option<PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA").or_else(|| std::env::var_os("APPDATA"))?;
+    let mut path = PathBuf::from(base);
+    path.push("The Ninth Virtue");
+    path.push(file_name);
+    Some(path)
+}
+
+fn paint_dungeon_cell(painter: &egui::Painter, rect: Rect, kind: DungeonCellKind) {
+    let outer = rect.shrink(rect.width().min(rect.height()) * 0.045);
+    let inner = outer.shrink(outer.width().min(outer.height()) * 0.11);
+
+    match kind {
+        DungeonCellKind::Corridor => paint_dungeon_floor_tile(
+            painter,
+            outer,
+            inner,
+            Color32::from_rgb(32, 39, 46),
+            Color32::from_rgb(23, 29, 35),
+        ),
+        DungeonCellKind::Room => paint_dungeon_floor_tile(
+            painter,
+            outer,
+            inner,
+            Color32::from_rgb(46, 68, 83),
+            Color32::from_rgb(34, 49, 60),
+        ),
+        DungeonCellKind::Wall => paint_dungeon_wall_tile(
+            painter,
+            outer,
+            inner,
+            Color32::from_rgb(182, 191, 202),
+            Color32::from_rgb(112, 122, 134),
+        ),
+        DungeonCellKind::WallAlt => paint_dungeon_wall_tile(
+            painter,
+            outer,
+            inner,
+            Color32::from_rgb(191, 185, 176),
+            Color32::from_rgb(121, 116, 110),
+        ),
+        DungeonCellKind::SecretDoor => {
+            paint_dungeon_wall_tile(
+                painter,
+                outer,
+                inner,
+                Color32::from_rgb(182, 191, 202),
+                Color32::from_rgb(112, 122, 134),
+            );
+            paint_secret_door_seam(painter, inner);
+        }
+        DungeonCellKind::Door => {
+            paint_dungeon_floor_tile(
+                painter,
+                outer,
+                inner,
+                Color32::from_rgb(32, 39, 46),
+                Color32::from_rgb(23, 29, 35),
+            );
+            paint_door_glyph(painter, inner);
+        }
+        DungeonCellKind::Ladder { up, down } => {
+            paint_dungeon_floor_tile(
+                painter,
+                outer,
+                inner,
+                Color32::from_rgb(32, 39, 46),
+                Color32::from_rgb(23, 29, 35),
+            );
+            paint_ladder_icon(painter, inner, up, down);
+        }
+    }
+}
+
+fn paint_dungeon_floor_tile(
+    painter: &egui::Painter,
+    outer: Rect,
+    inner: Rect,
+    rim: Color32,
+    fill: Color32,
+) {
+    painter.rect_filled(outer, 4.0, rim);
+    painter.rect_filled(inner, 3.0, fill);
+    painter.line_segment(
+        [
+            Pos2::new(inner.left(), inner.top() + 1.0),
+            Pos2::new(inner.right(), inner.top() + 1.0),
+        ],
+        Stroke::new(1.0, Color32::from_white_alpha(12)),
+    );
+    painter.line_segment(
+        [
+            Pos2::new(inner.left(), inner.bottom() - 1.0),
+            Pos2::new(inner.right(), inner.bottom() - 1.0),
+        ],
+        Stroke::new(1.0, Color32::from_black_alpha(70)),
+    );
+}
+
+fn paint_dungeon_wall_tile(
+    painter: &egui::Painter,
+    outer: Rect,
+    inner: Rect,
+    fill: Color32,
+    base: Color32,
+) {
+    painter.rect_filled(outer, 3.0, base);
+    painter.rect_filled(inner, 2.0, fill);
+
+    let mortar = Color32::from_black_alpha(48);
+    for y in [
+        inner.top() + inner.height() * 0.33,
+        inner.top() + inner.height() * 0.66,
+    ] {
+        painter.line_segment(
+            [Pos2::new(inner.left(), y), Pos2::new(inner.right(), y)],
+            Stroke::new(1.0, mortar),
+        );
+    }
+
+    painter.line_segment(
+        [
+            Pos2::new(inner.left(), inner.top()),
+            Pos2::new(inner.right(), inner.top()),
+        ],
+        Stroke::new(1.0, Color32::from_white_alpha(44)),
+    );
+    painter.line_segment(
+        [
+            Pos2::new(inner.left(), inner.bottom()),
+            Pos2::new(inner.right(), inner.bottom()),
+        ],
+        Stroke::new(1.0, Color32::from_black_alpha(88)),
+    );
+}
+
+fn paint_ladder_icon(painter: &egui::Painter, rect: Rect, up: bool, down: bool) {
+    let plaque = Rect::from_center_size(
+        rect.center(),
+        vec2(rect.width() * 0.52, rect.height() * 0.76),
+    );
+    painter.rect_filled(plaque, 5.0, Color32::from_rgb(22, 26, 31));
+    painter.rect_stroke(
+        plaque,
+        5.0,
+        Stroke::new(1.0, Color32::from_rgb(54, 60, 70)),
+        StrokeKind::Inside,
+    );
+
+    let left = plaque.left() + plaque.width() * 0.28;
+    let right = plaque.right() - plaque.width() * 0.28;
+    let top = plaque.top() + plaque.height() * 0.18;
+    let bottom = plaque.bottom() - plaque.height() * 0.18;
+    let gold = Color32::from_rgb(233, 197, 88);
+    let gold_shadow = Color32::from_rgb(122, 88, 24);
+
+    for x in [left, right] {
+        painter.line_segment(
+            [Pos2::new(x, top), Pos2::new(x, bottom)],
+            Stroke::new(3.0, gold_shadow),
+        );
+        painter.line_segment(
+            [Pos2::new(x, top), Pos2::new(x, bottom)],
+            Stroke::new(1.8, gold),
+        );
+    }
+
+    for t in [0.18, 0.38, 0.58, 0.78] {
+        let y = egui::lerp(top..=bottom, t);
+        painter.line_segment(
+            [Pos2::new(left, y), Pos2::new(right, y)],
+            Stroke::new(1.6, gold),
+        );
+    }
+
+    if up {
+        paint_ladder_badge(
+            painter,
+            Pos2::new(plaque.center().x, plaque.top() + plaque.height() * 0.11),
+            plaque.width() * 0.34,
+            true,
+        );
+    }
+    if down {
+        paint_ladder_badge(
+            painter,
+            Pos2::new(plaque.center().x, plaque.bottom() - plaque.height() * 0.11),
+            plaque.width() * 0.34,
+            false,
+        );
+    }
+}
+
+fn paint_ladder_badge(painter: &egui::Painter, center: Pos2, size: f32, up: bool) {
+    painter.circle_filled(center, size * 0.5, Color32::from_rgb(15, 20, 26));
+    painter.circle_stroke(
+        center,
+        size * 0.5,
+        Stroke::new(1.2, Color32::from_rgb(106, 198, 248)),
+    );
+
+    let half_w = size * 0.2;
+    let tip_offset = size * 0.18;
+    let base_offset = size * 0.12;
+    let points = if up {
+        [
+            Pos2::new(center.x, center.y - tip_offset),
+            Pos2::new(center.x - half_w, center.y + base_offset),
+            Pos2::new(center.x + half_w, center.y + base_offset),
+        ]
+    } else {
+        [
+            Pos2::new(center.x, center.y + tip_offset),
+            Pos2::new(center.x - half_w, center.y - base_offset),
+            Pos2::new(center.x + half_w, center.y - base_offset),
+        ]
+    };
+    paint_triangle(painter, points, Color32::from_rgb(124, 220, 255));
+}
+
+fn paint_secret_door_seam(painter: &egui::Painter, rect: Rect) {
+    let x = rect.center().x;
+    let dash = (rect.height() * 0.12).max(2.0);
+    let gap = dash * 0.72;
+    let mut y = rect.top() + rect.height() * 0.12;
+    while y < rect.bottom() - dash {
+        painter.line_segment(
+            [Pos2::new(x, y), Pos2::new(x, y + dash)],
+            Stroke::new(1.6, Color32::from_rgb(210, 186, 108)),
+        );
+        y += dash + gap;
+    }
+}
+
+fn paint_door_glyph(painter: &egui::Painter, rect: Rect) {
+    let door = Rect::from_center_size(
+        rect.center(),
+        vec2(rect.width() * 0.46, rect.height() * 0.66),
+    );
+    painter.rect_filled(door, 4.0, Color32::from_rgb(178, 141, 66));
+    painter.rect_stroke(
+        door,
+        4.0,
+        Stroke::new(1.2, Color32::from_rgb(78, 58, 20)),
+        StrokeKind::Inside,
+    );
+    for t in [0.28, 0.52, 0.76] {
+        let y = egui::lerp(door.top()..=door.bottom(), t);
+        painter.line_segment(
+            [
+                Pos2::new(door.left() + 2.0, y),
+                Pos2::new(door.right() - 2.0, y),
+            ],
+            Stroke::new(1.0, Color32::from_rgb(96, 72, 28)),
+        );
+    }
+}
+
+fn paint_triangle(painter: &egui::Painter, points: [Pos2; 3], fill: Color32) {
+    painter.add(egui::Shape::convex_polygon(
+        points.to_vec(),
+        fill,
+        Stroke::new(1.0, Color32::BLACK),
+    ));
 }
 
 /// Decode the combat terrain scratch grid.
@@ -451,6 +1109,10 @@ fn build_objects_overlay(
     grid_h: usize,
     map: &MapState,
 ) -> Vec<u8> {
+    debug_assert!(
+        !matches!(map.location, LocationType::Dungeon(_)),
+        "dungeon walking maps use the abstract painter path instead of sprite overlays"
+    );
     let mut overlay = vec![0u8; grid_w * grid_h];
     let half = grid_w as i32 / 2;
     let overworld = map.location.is_overworld();
@@ -671,13 +1333,39 @@ fn paint_overworld_overlay(
 /// Paint the current player location with a screen-space marker that keeps a
 /// readable minimum size while still expanding to nearly fill the tile at
 /// close zoom.
-fn paint_player_marker(ui: &egui::Ui, rect: Rect, grid_dims: (u32, u32), player_tile: [f32; 2]) {
+fn paint_player_marker(
+    ui: &egui::Ui,
+    rect: Rect,
+    grid_dims: (u32, u32),
+    player_tile: [f32; 2],
+    facing: Option<CardinalDirection>,
+) {
     if grid_dims.0 == 0 || grid_dims.1 == 0 {
         return;
     }
 
     let center = player_marker_center(rect, grid_dims, player_tile);
     let tile_span_px = (rect.width() / grid_dims.0 as f32).min(rect.height() / grid_dims.1 as f32);
+    paint_player_marker_at(ui, rect, center, tile_span_px, facing);
+}
+
+fn paint_centered_dungeon_player_marker(
+    ui: &egui::Ui,
+    rect: Rect,
+    facing: Option<CardinalDirection>,
+) {
+    let tile_span_px = (rect.width() / DUNGEON_LEVEL_WIDTH as f32)
+        .min(rect.height() / DUNGEON_LEVEL_HEIGHT as f32);
+    paint_player_marker_at(ui, rect, rect.center(), tile_span_px, facing);
+}
+
+fn paint_player_marker_at(
+    ui: &egui::Ui,
+    rect: Rect,
+    center: Pos2,
+    tile_span_px: f32,
+    facing: Option<CardinalDirection>,
+) {
     let style = player_marker_style(tile_span_px);
     let painter = ui.painter_at(rect);
 
@@ -687,6 +1375,56 @@ fn paint_player_marker(ui: &egui::Ui, rect: Rect, grid_dims: (u32, u32), player_
     } else {
         painter.circle_stroke(center, style.radius + 0.5, Stroke::new(3.0, Color32::BLACK));
         painter.circle_stroke(center, style.radius, Stroke::new(1.75, PLAYER_MARKER_COLOR));
+    }
+
+    if let Some(facing) = facing {
+        paint_player_facing_arrow(&painter, center, style, facing);
+    }
+}
+
+fn paint_player_facing_arrow(
+    painter: &egui::Painter,
+    center: Pos2,
+    style: PlayerMarkerStyle,
+    facing: CardinalDirection,
+) {
+    let unit = facing_unit_vector(facing);
+    let perp = vec2(-unit.y, unit.x);
+    let tip_distance =
+        (style.radius + PLAYER_FACING_ARROW_EXTRA_LEN).max(PLAYER_FACING_ARROW_MIN_LEN);
+    let base_distance = (style.radius * 0.45).max(2.0);
+    let half_width = PLAYER_FACING_ARROW_WIDTH.max(style.radius * 0.35);
+
+    let tip = center + unit * tip_distance;
+    let base_center = center + unit * base_distance;
+    let left = base_center + perp * half_width;
+    let right = base_center - perp * half_width;
+
+    painter.add(egui::Shape::convex_polygon(
+        vec![tip, left, right],
+        Color32::BLACK,
+        Stroke::NONE,
+    ));
+
+    let inner_tip = center + unit * (tip_distance - 1.5);
+    let inner_base_center = center + unit * (base_distance + 0.5);
+    let inner_half_width = (half_width - 1.5).max(1.5);
+    let inner_left = inner_base_center + perp * inner_half_width;
+    let inner_right = inner_base_center - perp * inner_half_width;
+
+    painter.add(egui::Shape::convex_polygon(
+        vec![inner_tip, inner_left, inner_right],
+        PLAYER_MARKER_COLOR,
+        Stroke::NONE,
+    ));
+}
+
+fn facing_unit_vector(facing: CardinalDirection) -> egui::Vec2 {
+    match facing {
+        CardinalDirection::North => vec2(0.0, -1.0),
+        CardinalDirection::East => vec2(1.0, 0.0),
+        CardinalDirection::South => vec2(0.0, 1.0),
+        CardinalDirection::West => vec2(-1.0, 0.0),
     }
 }
 
@@ -868,6 +1606,17 @@ mod tests {
     }
 
     #[test]
+    fn facing_unit_vector_matches_cardinal_axes() {
+        assert_eq!(
+            facing_unit_vector(CardinalDirection::North),
+            vec2(0.0, -1.0)
+        );
+        assert_eq!(facing_unit_vector(CardinalDirection::East), vec2(1.0, 0.0));
+        assert_eq!(facing_unit_vector(CardinalDirection::South), vec2(0.0, 1.0));
+        assert_eq!(facing_unit_vector(CardinalDirection::West), vec2(-1.0, 0.0));
+    }
+
+    #[test]
     fn label_filters_can_hide_shrines_without_hiding_towns() {
         let filters = LabelFilters {
             shrines: false,
@@ -966,6 +1715,7 @@ mod tests {
             z: 0xFF,
             x: 1,
             y: 2,
+            dungeon_facing: None,
             transport: 0,
             scroll_x: 0,
             scroll_y: 0,
@@ -1094,6 +1844,7 @@ mod tests {
             z: 0xFF,
             x: 12,
             y: 8,
+            dungeon_facing: None,
             transport: 0,
             scroll_x: 0,
             scroll_y: 0,
@@ -1128,6 +1879,7 @@ mod tests {
             z: 0,
             x: 4,
             y: 10,
+            dungeon_facing: None,
             transport: 0,
             scroll_x: 192,
             scroll_y: 48,
@@ -1144,6 +1896,129 @@ mod tests {
 
         let overlay = build_objects_overlay(&objects, 11, 11, &map);
         assert_eq!(overlay[9 * 11 + 6], 11);
+    }
+
+    #[test]
+    fn dungeon_cell_classification_maps_structural_features() {
+        assert_eq!(
+            classify_dungeon_cell(0x10),
+            DungeonCellKind::Ladder {
+                up: true,
+                down: false,
+            }
+        );
+        assert_eq!(
+            classify_dungeon_cell(0x20),
+            DungeonCellKind::Ladder {
+                up: false,
+                down: true,
+            }
+        );
+        assert_eq!(
+            classify_dungeon_cell(0x30),
+            DungeonCellKind::Ladder {
+                up: true,
+                down: true,
+            }
+        );
+        assert_eq!(classify_dungeon_cell(0xB0), DungeonCellKind::Wall);
+        assert_eq!(classify_dungeon_cell(0xC0), DungeonCellKind::WallAlt);
+        assert_eq!(classify_dungeon_cell(0xD0), DungeonCellKind::SecretDoor);
+        assert_eq!(classify_dungeon_cell(0xE0), DungeonCellKind::Door);
+        assert_eq!(classify_dungeon_cell(0xA0), DungeonCellKind::Room);
+        assert_eq!(classify_dungeon_cell(0xF0), DungeonCellKind::Room);
+    }
+
+    #[test]
+    fn dungeon_cell_classification_collapses_nonstructural_codes_to_corridor() {
+        assert_eq!(classify_dungeon_cell(0x00), DungeonCellKind::Corridor);
+        assert_eq!(classify_dungeon_cell(0x40), DungeonCellKind::Corridor);
+        assert_eq!(classify_dungeon_cell(0x50), DungeonCellKind::Corridor);
+        assert_eq!(classify_dungeon_cell(0x60), DungeonCellKind::Corridor);
+        assert_eq!(classify_dungeon_cell(0x70), DungeonCellKind::Corridor);
+        assert_eq!(classify_dungeon_cell(0x80), DungeonCellKind::Corridor);
+    }
+
+    #[test]
+    fn dungeon_primary_view_swaps_between_centered_and_fixed() {
+        assert_eq!(
+            DungeonPrimaryView::Centered.swapped(),
+            DungeonPrimaryView::Fixed
+        );
+        assert_eq!(
+            DungeonPrimaryView::Fixed.swapped(),
+            DungeonPrimaryView::Centered
+        );
+    }
+
+    #[test]
+    fn parse_dungeon_primary_view_accepts_known_values() {
+        assert_eq!(
+            parse_dungeon_primary_view("centered"),
+            Some(DungeonPrimaryView::Centered)
+        );
+        assert_eq!(
+            parse_dungeon_primary_view(" fixed "),
+            Some(DungeonPrimaryView::Fixed)
+        );
+        assert_eq!(parse_dungeon_primary_view("weird"), None);
+    }
+
+    #[test]
+    fn parse_bool_pref_accepts_true_and_false() {
+        assert_eq!(parse_bool_pref("true"), Some(true));
+        assert_eq!(parse_bool_pref(" false "), Some(false));
+        assert_eq!(parse_bool_pref("maybe"), None);
+    }
+
+    #[test]
+    fn centered_dungeon_tile_rect_keeps_player_tile_at_view_center() {
+        let rect = Rect::from_min_size(Pos2::new(0.0, 0.0), vec2(160.0, 160.0));
+        let cell = centered_dungeon_tile_rect(rect, [3.0, 5.0], [3.0, 5.0]);
+
+        assert_eq!(cell.center(), rect.center());
+        assert_eq!(cell.size(), vec2(20.0, 20.0));
+    }
+
+    #[test]
+    fn centered_dungeon_tile_rect_places_wrapped_repeat_adjacent_to_player() {
+        let rect = Rect::from_min_size(Pos2::new(0.0, 0.0), vec2(160.0, 160.0));
+        let wrapped_copy = centered_dungeon_tile_rect(rect, [7.0, 2.0], [8.0, 2.0]);
+
+        assert_eq!(
+            wrapped_copy.center(),
+            Pos2::new(rect.center().x + 20.0, rect.center().y)
+        );
+    }
+
+    #[test]
+    fn fixed_dungeon_tile_rect_uses_canonical_8x8_layout() {
+        let rect = Rect::from_min_size(Pos2::new(16.0, 24.0), vec2(160.0, 160.0));
+        let cell = fixed_dungeon_tile_rect(rect, 3, 5);
+
+        assert_eq!(cell.min, Pos2::new(76.0, 124.0));
+        assert_eq!(cell.max, Pos2::new(96.0, 144.0));
+    }
+
+    #[test]
+    fn dungeon_overview_rect_stays_in_top_right_of_map() {
+        let map_rect = Rect::from_min_size(Pos2::new(40.0, 60.0), vec2(400.0, 400.0));
+        let inset = dungeon_overview_rect(map_rect);
+
+        assert!(inset.right() <= map_rect.right());
+        assert!(inset.top() >= map_rect.top());
+        assert!(inset.center().x > map_rect.center().x);
+        assert!(inset.center().y < map_rect.center().y);
+    }
+
+    #[test]
+    fn dungeon_overview_rect_handles_narrow_map_without_panicking() {
+        let map_rect = Rect::from_min_size(Pos2::new(0.0, 0.0), vec2(60.0, 160.0));
+        let inset = dungeon_overview_rect(map_rect);
+
+        assert!(inset.width() >= 8.0);
+        assert!(inset.right() <= map_rect.right());
+        assert!(inset.top() >= map_rect.top());
     }
 
     #[test]
@@ -1176,6 +2051,20 @@ mod tests {
     }
 
     #[test]
+    fn dungeon_grid_uses_first_floor_slice_only() {
+        let mut tiles = [0u8; 1024];
+        for (idx, tile) in tiles.iter_mut().take(DUNGEON_LEVEL_LEN).enumerate() {
+            *tile = idx as u8;
+        }
+        tiles[DUNGEON_LEVEL_LEN] = 0xEE;
+
+        let grid = extract_dungeon_grid(&tiles);
+        assert_eq!(grid.len(), DUNGEON_LEVEL_LEN);
+        assert_eq!(grid[0], 0);
+        assert_eq!(grid[DUNGEON_LEVEL_LEN - 1], 63);
+    }
+
+    #[test]
     fn local_scene_grid_uses_combat_dimensions_and_marker() {
         let mut combat_tiles = [0u8; COMBAT_TERRAIN_LEN];
         combat_tiles[10 * COMBAT_TERRAIN_STRIDE + 4] = 0x44;
@@ -1184,6 +2073,7 @@ mod tests {
             z: 0,
             x: 4,
             y: 10,
+            dungeon_facing: None,
             transport: 0,
             scroll_x: 192,
             scroll_y: 48,
@@ -1196,6 +2086,33 @@ mod tests {
         assert_eq!((width, height), (11, 11));
         assert_eq!(marker, [4.0, 10.0]);
         assert_eq!(grid[10 * 11 + 4], 0x44);
+    }
+
+    #[test]
+    fn local_scene_grid_uses_dungeon_local_marker_coordinates() {
+        let mut tiles = [0u8; 1024];
+        tiles[2 * DUNGEON_LEVEL_WIDTH + 1] = 0x44;
+        let map = MapState {
+            location: LocationType::Dungeon(34),
+            z: 0,
+            x: 1,
+            y: 2,
+            dungeon_facing: Some(CardinalDirection::South),
+            transport: 0,
+            scroll_x: 80,
+            scroll_y: 48,
+            tiles,
+            combat_tiles: None,
+            objects: Vec::new(),
+        };
+
+        let (grid, width, height, marker) = extract_local_scene_grid(&map);
+        assert_eq!(
+            (width, height),
+            (DUNGEON_LEVEL_WIDTH as u32, DUNGEON_LEVEL_HEIGHT as u32)
+        );
+        assert_eq!(marker, [1.0, 2.0]);
+        assert_eq!(grid[2 * DUNGEON_LEVEL_WIDTH + 1], 0x44);
     }
 
     #[test]
@@ -1222,6 +2139,10 @@ mod tests {
         assert_eq!(
             LocationType::Town(1).tile_grid_encoding(),
             TileGridEncoding::RowMajor32
+        );
+        assert_eq!(
+            LocationType::Dungeon(34).tile_grid_encoding(),
+            TileGridEncoding::Dungeon8x8
         );
     }
 }
