@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::game::map::LocationType;
+use crate::game::map::{LocationType, is_underworld_z};
 use crate::game::quest::Virtue;
 
 /// Offset in DATA.OVL where the 256-byte chunk flag table starts.
@@ -18,7 +18,6 @@ const DATA_OVL_SHRINE_Y: usize = 0x1F86;
 const WATER_TILE: u8 = 0x01;
 const OUTDOOR_MAP_LEN: usize = 256 * 256;
 const OUTDOOR_CHUNK_LEN: usize = 16 * 16;
-const OUTDOOR_CHUNK_COUNT: usize = 16 * 16;
 
 /// Filter categories exposed by the overworld minimap label controls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,7 +132,7 @@ impl WorldMap {
 
     /// Get the tile ID at outdoor world coordinates (x, y).
     pub fn outdoor_tile(&self, z: u8, x: u8, y: u8) -> u8 {
-        let tiles = if z > 0x7F {
+        let tiles = if is_underworld_z(z) {
             &self.underworld_tiles
         } else {
             &self.britannia_tiles
@@ -186,13 +185,11 @@ fn decode_underworld_tiles(under_data: &[u8]) -> Result<Box<[u8; OUTDOOR_MAP_LEN
     );
 
     let mut tiles = Box::new([0u8; OUTDOOR_MAP_LEN]);
-    for chunk_idx in 0..OUTDOOR_CHUNK_COUNT {
-        let file_offset = chunk_idx * OUTDOOR_CHUNK_LEN;
-        blit_outdoor_chunk(
-            &mut tiles,
-            chunk_idx,
-            &under_data[file_offset..file_offset + OUTDOOR_CHUNK_LEN],
-        );
+    for (chunk_idx, chunk_data) in under_data[..OUTDOOR_MAP_LEN]
+        .chunks_exact(OUTDOOR_CHUNK_LEN)
+        .enumerate()
+    {
+        blit_outdoor_chunk(&mut tiles, chunk_idx, chunk_data);
     }
 
     Ok(tiles)

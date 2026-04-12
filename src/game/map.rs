@@ -56,6 +56,14 @@ pub enum TileGridEncoding {
     Combat11x11Stride32,
 }
 
+/// Outdoor scenes with Z above this boundary use the Underworld map data.
+pub const UNDERWORLD_Z_THRESHOLD: u8 = 0x7F;
+
+/// Whether the shared outdoor scene is currently showing the Underworld.
+pub fn is_underworld_z(z: u8) -> bool {
+    z > UNDERWORLD_Z_THRESHOLD
+}
+
 impl LocationType {
     fn from_id(id: u8) -> Self {
         match id {
@@ -140,7 +148,8 @@ impl LocationType {
         }
     }
 
-    /// Whether the current scene uses Britannia overworld coordinates.
+    /// Whether the current location id refers to Ultima V's shared outdoor
+    /// scene code. MAP_Z still distinguishes Britannia from the Underworld.
     pub fn is_overworld(self) -> bool {
         matches!(self, Self::Overworld)
     }
@@ -198,7 +207,7 @@ impl MapState {
     /// MAP_Z selects the active outdoor world, with high values meaning the
     /// Underworld.
     pub fn is_underworld(&self) -> bool {
-        self.is_outdoor() && self.z > 0x7F
+        self.is_outdoor() && is_underworld_z(self.z)
     }
 
     /// Human-readable scene name for the current runtime state.
@@ -541,6 +550,9 @@ mod tests {
 
     #[test]
     fn underworld_detection_comes_from_outdoor_z() {
+        assert!(!is_underworld_z(UNDERWORLD_Z_THRESHOLD));
+        assert!(is_underworld_z(UNDERWORLD_Z_THRESHOLD + 1));
+
         let mut state = MapState {
             location: LocationType::Overworld,
             z: 0,

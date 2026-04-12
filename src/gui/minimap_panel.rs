@@ -120,17 +120,18 @@ struct OverworldOverlayOptions {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// Distinguishes overworld rendering from 32x32 local map rendering.
+/// Distinguishes shared outdoor rendering from 32x32 local map rendering.
 enum GridSource {
     Local,
-    Overworld,
+    Outdoor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Cache identity for the current minimap grid contents.
 ///
-/// Local maps need their own discriminator so switching towns or dungeon floors
-/// at the same coordinates still invalidates the cached terrain texture.
+/// Local maps need their own discriminator so switching towns, dungeon floors,
+/// or outdoor layers at the same coordinates still invalidates the cached
+/// terrain texture.
 struct GridCacheKey {
     center: (u8, u8),
     zoom: usize,
@@ -284,7 +285,7 @@ pub fn show(
     let cx = map.x;
     let cy = map.y;
     let grid_source = if is_outdoor && world_map.is_some() {
-        GridSource::Overworld
+        GridSource::Outdoor
     } else {
         GridSource::Local
     };
@@ -1696,7 +1697,7 @@ mod tests {
             GridCacheKey {
                 center: (42, 43),
                 zoom: 32,
-                source: GridSource::Overworld,
+                source: GridSource::Outdoor,
                 local_map: None,
                 outdoor_z: Some(0),
             },
@@ -1706,14 +1707,14 @@ mod tests {
             Some(GridCacheKey {
                 center: (42, 43),
                 zoom: 32,
-                source: GridSource::Overworld,
+                source: GridSource::Outdoor,
                 local_map: None,
                 outdoor_z: Some(0),
             }),
             GridCacheKey {
                 center: (42, 43),
                 zoom: 32,
-                source: GridSource::Overworld,
+                source: GridSource::Outdoor,
                 local_map: None,
                 outdoor_z: Some(0),
             },
@@ -1765,14 +1766,14 @@ mod tests {
             Some(GridCacheKey {
                 center: (99, 68),
                 zoom: 48,
-                source: GridSource::Overworld,
+                source: GridSource::Outdoor,
                 local_map: None,
                 outdoor_z: Some(0),
             }),
             GridCacheKey {
                 center: (99, 68),
                 zoom: 48,
-                source: GridSource::Overworld,
+                source: GridSource::Outdoor,
                 local_map: None,
                 outdoor_z: Some(0xFF),
             },
@@ -1799,7 +1800,7 @@ mod tests {
         state.last_grid_key = Some(GridCacheKey {
             center: (1, 2),
             zoom: 32,
-            source: GridSource::Overworld,
+            source: GridSource::Outdoor,
             local_map: None,
             outdoor_z: Some(0xFF),
         });
