@@ -585,9 +585,6 @@ impl eframe::App for UltimaCompanion {
                         self.sync_confirmed_game_state();
                     } else {
                         self.try_promote_to_confirmed_process();
-                        if self.attached.as_ref().is_some_and(|a| a.game_confirmed) {
-                            self.sync_confirmed_game_state();
-                        }
                     }
                 }
                 ctx.request_repaint_after(RESCAN_INTERVAL);
