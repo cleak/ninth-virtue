@@ -11,10 +11,13 @@ Small, focused pull requests are easiest to review.
 
 ## Development
 
-Before opening a pull request, run:
+Do not open or update a pull request with new build warnings.
 
-```bash
+From PowerShell, before opening or updating a pull request, run:
+
+```powershell
 cargo fmt --all -- --check
+./scripts/check-no-build-warnings.ps1
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked
 ```

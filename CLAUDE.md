@@ -8,7 +8,7 @@ ninth-virtue ("The Ninth Virtue: Convenience") is a companion app for Ultima V (
 
 ## Build Commands
 
-```bash
+```powershell
 cargo build              # debug build
 cargo build --release    # release build
 cargo run                # build and run
@@ -17,7 +17,14 @@ cargo test <name>        # run a single test by name
 cargo clippy             # lint
 cargo fmt                # format code
 cargo fmt -- --check     # check formatting without modifying
+./scripts/check-no-build-warnings.ps1  # fail on any build warning
 ```
+
+## Pull Request Checks
+
+- Do not introduce new build warnings.
+- Always run `./scripts/check-no-build-warnings.ps1` before creating or updating a PR.
+- Before creating or updating a PR, also run `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets --all-features -- -D warnings`, and `cargo test --locked`.
 
 ## Architecture
 
