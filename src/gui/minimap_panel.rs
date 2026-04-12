@@ -136,6 +136,7 @@ struct GridCacheKey {
     zoom: usize,
     source: GridSource,
     local_map: Option<(LocationType, u8)>,
+    outdoor_z: Option<u8>,
 }
 
 /// Shared state accessed by both the UI thread (for updates) and the paint
@@ -259,7 +260,8 @@ pub fn show(
         return;
     };
     let is_dungeon = matches!(map.location, LocationType::Dungeon(_));
-    let is_overworld = map.location.is_overworld();
+    let is_outdoor = map.is_outdoor();
+    let is_underworld = map.is_underworld();
 
     render_minimap_header(ui, state, &map, world_map.is_some());
 
@@ -278,11 +280,10 @@ pub fn show(
             .as_ref()
             .map(|raw_atlas| build_tile_lowpass_lut(raw_atlas.as_slice()));
     }
-
     let zoom = state.zoom;
     let cx = map.x;
     let cy = map.y;
-    let grid_source = if is_overworld && world_map.is_some() {
+    let grid_source = if is_outdoor && world_map.is_some() {
         GridSource::Overworld
     } else {
         GridSource::Local
@@ -291,7 +292,8 @@ pub fn show(
         center: (cx, cy),
         zoom,
         source: grid_source,
-        local_map: (!is_overworld).then_some((map.location, map.z)),
+        local_map: (!is_outdoor).then_some((map.location, map.z)),
+        outdoor_z: is_outdoor.then_some(map.z),
     };
 
     // Prepare tile grid data on CPU when map state changes.
@@ -301,8 +303,8 @@ pub fn show(
 
     if needs_update {
         let (grid_data, grid_w, grid_h, player_tile) =
-            if let Some(wm) = world_map.filter(|_| is_overworld) {
-                let grid = extract_overworld_grid(wm, cx, cy, zoom);
+            if let Some(wm) = world_map.filter(|_| is_outdoor) {
+                let grid = extract_outdoor_grid(wm, cx, cy, zoom, map.z);
                 let half = zoom as f32 / 2.0;
                 (grid, zoom as u32, zoom as u32, [half, half])
             } else {
@@ -371,7 +373,7 @@ pub fn show(
             callback: Arc::new(callback),
         });
 
-        if let Some(wm) = world_map.filter(|_| is_overworld) {
+        if let Some(wm) = world_map.filter(|_| is_outdoor && !is_underworld) {
             let overlay = OverworldOverlayOptions {
                 cx,
                 cy,
@@ -422,12 +424,19 @@ fn render_minimap_header(
     world_map_loaded: bool,
 ) {
     let is_dungeon = matches!(map.location, LocationType::Dungeon(_));
-    let header = if map.z == 0xFF {
-        format!("{} ({}, {})", map.location.name(), map.x, map.y)
+    let is_outdoor = map.is_outdoor();
+    let is_underworld = map.is_underworld();
+    let header = if is_outdoor || map.z == 0xFF {
+        format!("{} ({}, {})", map.display_location_name(), map.x, map.y)
     } else {
-        format!("{} ({}, {}) Z:{}", map.location.name(), map.x, map.y, map.z)
+        format!(
+            "{} ({}, {}) Z:{}",
+            map.display_location_name(),
+            map.x,
+            map.y,
+            map.z
+        )
     };
-    let is_overworld = map.location.is_overworld();
 
     ui.vertical(|ui| {
         // Keep the changing coordinate text on its own line so movement cannot
@@ -469,7 +478,7 @@ fn render_minimap_header(
             }
         });
 
-        if is_overworld && world_map_loaded {
+        if is_outdoor && !is_underworld && world_map_loaded {
             ui.horizontal_wrapped(|ui| {
                 ui.checkbox(&mut state.show_labels, "Labels");
                 ui.add_enabled_ui(state.show_labels, |ui| {
@@ -485,15 +494,16 @@ fn render_minimap_header(
     });
 }
 
-/// Extract a zoom x zoom window from the overworld centered on (cx, cy), wrapping at 256.
-fn extract_overworld_grid(world: &WorldMap, cx: u8, cy: u8, zoom: usize) -> Vec<u8> {
+/// Extract a zoom x zoom window from the active outdoor world centered on
+/// (cx, cy), wrapping at 256.
+fn extract_outdoor_grid(world: &WorldMap, cx: u8, cy: u8, zoom: usize, z: u8) -> Vec<u8> {
     let half = zoom as i32 / 2;
     let mut grid = vec![0u8; zoom * zoom];
     for vy in 0..zoom {
         for vx in 0..zoom {
             let wx = (cx as i32 - half + vx as i32).rem_euclid(256) as u8;
             let wy = (cy as i32 - half + vy as i32).rem_euclid(256) as u8;
-            grid[vy * zoom + vx] = world.get_tile(wx, wy);
+            grid[vy * zoom + vx] = world.outdoor_tile(z, wx, wy);
         }
     }
     grid
@@ -1149,15 +1159,15 @@ fn build_objects_overlay(
     );
     let mut overlay = vec![0u8; grid_w * grid_h];
     let half = grid_w as i32 / 2;
-    let overworld = map.location.is_overworld();
+    let outdoor = map.is_outdoor();
     let combat = matches!(map.location, LocationType::Combat(_));
 
     for obj in objects {
-        if !overworld && obj.floor != map.z {
+        if !outdoor && obj.floor != map.z {
             continue;
         }
 
-        let (gx, gy) = if overworld {
+        let (gx, gy) = if outdoor {
             let vx = (obj.x as i32 - map.x as i32 + half).rem_euclid(256);
             let vy = (obj.y as i32 - map.y as i32 + half).rem_euclid(256);
             (vx, vy)
@@ -1681,12 +1691,14 @@ mod tests {
                 zoom: 32,
                 source: GridSource::Local,
                 local_map: Some((LocationType::Town(1), 0)),
+                outdoor_z: None,
             }),
             GridCacheKey {
                 center: (42, 43),
                 zoom: 32,
                 source: GridSource::Overworld,
                 local_map: None,
+                outdoor_z: Some(0),
             },
             false,
         ));
@@ -1696,12 +1708,14 @@ mod tests {
                 zoom: 32,
                 source: GridSource::Overworld,
                 local_map: None,
+                outdoor_z: Some(0),
             }),
             GridCacheKey {
                 center: (42, 43),
                 zoom: 32,
                 source: GridSource::Overworld,
                 local_map: None,
+                outdoor_z: Some(0),
             },
             false,
         ));
@@ -1715,12 +1729,14 @@ mod tests {
                 zoom: 32,
                 source: GridSource::Local,
                 local_map: Some((LocationType::Town(1), 0)),
+                outdoor_z: None,
             }),
             GridCacheKey {
                 center: (12, 9),
                 zoom: 32,
                 source: GridSource::Local,
                 local_map: Some((LocationType::Town(2), 0)),
+                outdoor_z: None,
             },
             false,
         ));
@@ -1730,12 +1746,35 @@ mod tests {
                 zoom: 32,
                 source: GridSource::Local,
                 local_map: Some((LocationType::Dungeon(33), 0)),
+                outdoor_z: None,
             }),
             GridCacheKey {
                 center: (12, 9),
                 zoom: 32,
                 source: GridSource::Local,
                 local_map: Some((LocationType::Dungeon(33), 1)),
+                outdoor_z: None,
+            },
+            false,
+        ));
+    }
+
+    #[test]
+    fn outdoor_layer_change_invalidates_cached_grid() {
+        assert!(needs_grid_refresh(
+            Some(GridCacheKey {
+                center: (99, 68),
+                zoom: 48,
+                source: GridSource::Overworld,
+                local_map: None,
+                outdoor_z: Some(0),
+            }),
+            GridCacheKey {
+                center: (99, 68),
+                zoom: 48,
+                source: GridSource::Overworld,
+                local_map: None,
+                outdoor_z: Some(0xFF),
             },
             false,
         ));
@@ -1762,6 +1801,7 @@ mod tests {
             zoom: 32,
             source: GridSource::Overworld,
             local_map: None,
+            outdoor_z: Some(0xFF),
         });
         state.raw_atlas = Some(Arc::new(vec![1, 2, 3]));
 

@@ -188,6 +188,29 @@ pub struct MapState {
     pub objects: Vec<ObjectEntry>,
 }
 
+impl MapState {
+    /// Whether the active scene is one of Ultima V's shared outdoor worlds.
+    pub fn is_outdoor(&self) -> bool {
+        self.location.is_overworld()
+    }
+
+    /// Ultima V reuses MAP_LOCATION=0 for both Britannia and the Underworld.
+    /// MAP_Z selects the active outdoor world, with high values meaning the
+    /// Underworld.
+    pub fn is_underworld(&self) -> bool {
+        self.is_outdoor() && self.z > 0x7F
+    }
+
+    /// Human-readable scene name for the current runtime state.
+    pub fn display_location_name(&self) -> &'static str {
+        if self.is_underworld() {
+            "Underworld"
+        } else {
+            self.location.name()
+        }
+    }
+}
+
 /// An object from the 32-slot object table (save offset 0x6B4).
 ///
 /// Represents anything rendered on the map that isn't terrain:
@@ -514,5 +537,30 @@ mod tests {
         assert_eq!(obj.x, 4);
         assert_eq!(obj.y, 5);
         assert_eq!(obj.floor, 0);
+    }
+
+    #[test]
+    fn underworld_detection_comes_from_outdoor_z() {
+        let mut state = MapState {
+            location: LocationType::Overworld,
+            z: 0,
+            x: 0,
+            y: 0,
+            dungeon_facing: None,
+            transport: 0,
+            scroll_x: 0,
+            scroll_y: 0,
+            tiles: [0; MAP_TILES_LEN],
+            combat_tiles: None,
+            objects: Vec::new(),
+        };
+
+        assert!(state.is_outdoor());
+        assert!(!state.is_underworld());
+        assert_eq!(state.display_location_name(), "Overworld");
+
+        state.z = 0xFF;
+        assert!(state.is_underworld());
+        assert_eq!(state.display_location_name(), "Underworld");
     }
 }
