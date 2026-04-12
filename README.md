@@ -62,7 +62,14 @@ Typical workflow:
 
 ## Releasing
 
-GitHub Actions publishes tagged Windows releases automatically. Update the version in `Cargo.toml`, then push a matching tag in the form `vX.Y.Z` such as `v0.1.0`. CI verifies that the tag and Cargo version match, then it will:
+GitHub Actions uses separate CI and release workflows. `CI` runs on branch pushes and pull requests, while `Release` runs only when you push a matching version tag with a `vX.Y.Z`-style name such as `v0.1.0`. Update the version in `Cargo.toml`, create the matching tag from the commit you want to ship, and push it:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release workflow verifies that the tag and Cargo version match exactly, then it will:
 
 - run formatting, the no-build-warnings check, clippy, and tests
 - build the release binary

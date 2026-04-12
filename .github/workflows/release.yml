@@ -1,0 +1,129 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    outputs:
+      release_archive: ${{ steps.release_meta.outputs.archive_name }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: 1.92.0
+          components: rustfmt, clippy
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Prepare release metadata
+        id: release_meta
+        shell: pwsh
+        run: |
+          $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
+          $rootPackageId = $metadata.workspace_default_members | Select-Object -First 1
+          $package = $metadata.packages | Where-Object { $_.id -eq $rootPackageId } | Select-Object -First 1
+
+          if (-not $package) {
+            throw "Workspace root package was not found in cargo metadata."
+          }
+
+          $binaryName = $package.default_run
+          if (-not $binaryName) {
+            $binaryName = ($package.targets | Where-Object { $_.kind -contains 'bin' } | Select-Object -First 1).name
+          }
+
+          if (-not $binaryName) {
+            throw "No binary target was found for the workspace root package."
+          }
+
+          $expectedTag = "v$($package.version)"
+          if ($env:GITHUB_REF_NAME -ne $expectedTag) {
+            throw "Tag '$env:GITHUB_REF_NAME' does not match Cargo.toml version '$($package.version)'. Expected tag '$expectedTag'."
+          }
+
+          $archiveName = "$binaryName-$($env:GITHUB_REF_NAME)-windows-x86_64.zip"
+
+          "binary_name=$binaryName" >> $env:GITHUB_OUTPUT
+          "archive_name=$archiveName" >> $env:GITHUB_OUTPUT
+
+      - name: Build release binary
+        run: cargo build --locked --release --bin "${{ steps.release_meta.outputs.binary_name }}"
+
+      - name: Package release archive
+        id: package
+        shell: pwsh
+        run: |
+          $binaryName = "${{ steps.release_meta.outputs.binary_name }}"
+          $archiveName = "${{ steps.release_meta.outputs.archive_name }}"
+          $packageName = [System.IO.Path]::GetFileNameWithoutExtension($archiveName)
+          $packageRoot = Join-Path $env:RUNNER_TEMP $packageName
+          $archivePath = Join-Path $env:RUNNER_TEMP $archiveName
+
+          if (Test-Path $packageRoot) {
+            Remove-Item $packageRoot -Recurse -Force
+          }
+
+          New-Item -ItemType Directory -Path $packageRoot | Out-Null
+          Copy-Item "target/release/$binaryName.exe" -Destination $packageRoot
+          Copy-Item "README.md" -Destination $packageRoot
+          Copy-Item "LICENSE-MIT" -Destination $packageRoot
+          Copy-Item "LICENSE-APACHE" -Destination $packageRoot
+
+          if (Test-Path $archivePath) {
+            Remove-Item $archivePath -Force
+          }
+
+          Compress-Archive -Path $packageRoot -DestinationPath $archivePath
+
+          "archive_path=$archivePath" >> $env:GITHUB_OUTPUT
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-package
+          path: ${{ steps.package.outputs.archive_path }}
+          if-no-files-found: error
+
+  github_release:
+    needs: windows
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download release artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-package
+          path: release-assets
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: release-assets/${{ needs.windows.outputs.release_archive }}
+          fail_on_unmatched_files: true
+          generate_release_notes: true
