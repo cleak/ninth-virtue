@@ -1,11 +1,35 @@
 use anyhow::Result;
 
 use crate::game::offsets::{
-    COMBAT_TERRAIN_GRID, COMBAT_TERRAIN_LEN, MAP_LOCATION, MAP_SCROLL_X, MAP_SCROLL_Y, MAP_TILES,
-    MAP_TILES_LEN, MAP_TRANSPORT, MAP_X, MAP_Y, MAP_Z, OBJ_FLOOR, OBJ_TILE1, OBJ_X, OBJ_Y,
-    OBJECT_ENTRY_SIZE, OBJECT_TABLE, OBJECT_TABLE_SLOTS, ds_addr, inv_addr,
+    COMBAT_TERRAIN_GRID, COMBAT_TERRAIN_LEN, DUNGEON_FLOORS, DUNGEON_LEVEL_LEN,
+    DUNGEON_ORIENTATION, DUNGEON_TILES_DS_OFFSET, DUNGEON_TILES_LEN, DUNGEON_TILES_SAVE_OFFSET,
+    MAP_LOCATION, MAP_SCROLL_X, MAP_SCROLL_Y, MAP_TILES, MAP_TILES_LEN, MAP_TRANSPORT, MAP_X,
+    MAP_Y, MAP_Z, OBJ_FLOOR, OBJ_TILE1, OBJ_X, OBJ_Y, OBJECT_ENTRY_SIZE, OBJECT_TABLE,
+    OBJECT_TABLE_SLOTS, ds_addr, inv_addr,
 };
 use crate::memory::access::MemoryAccess;
+
+/// Cardinal directions used by first-person dungeon navigation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CardinalDirection {
+    North,
+    East,
+    South,
+    West,
+}
+
+impl CardinalDirection {
+    /// Convert Ultima V's dungeon-facing byte into a cardinal direction.
+    pub fn from_dungeon_byte(byte: u8) -> Option<Self> {
+        match byte {
+            0 => Some(Self::North),
+            1 => Some(Self::East),
+            2 => Some(Self::South),
+            3 => Some(Self::West),
+            _ => None,
+        }
+    }
+}
 
 /// Which type of location the party is currently in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +50,8 @@ pub enum TileGridEncoding {
     RowMajor32,
     /// Four 16x16 chunks packed sequentially.
     Chunked16x16,
+    /// Dungeon scenes expose one floor-local 8x8 semantic-cell grid as 64 row-major bytes.
+    Dungeon8x8,
     /// Combat-only 11x11 active grid with a 32-byte row stride.
     Combat11x11Stride32,
 }
@@ -126,10 +152,8 @@ impl LocationType {
             Self::Town(_) | Self::Dwelling(_) | Self::Castle(_) | Self::Keep(_) => {
                 TileGridEncoding::RowMajor32
             }
+            Self::Dungeon(_) => TileGridEncoding::Dungeon8x8,
             Self::Combat(_) => TileGridEncoding::Combat11x11Stride32,
-            // Dungeons likely need their own dedicated buffer (0x3B4 / DS:0x595A),
-            // but keep the current path unchanged until that is reverse engineered.
-            Self::Dungeon(_) => TileGridEncoding::RowMajor32,
         }
     }
 }
@@ -141,15 +165,21 @@ pub struct MapState {
     pub z: u8,
     pub x: u8,
     pub y: u8,
+    /// First-person facing in dungeons: 0=north, 1=east, 2=south, 3=west.
+    pub dungeon_facing: Option<CardinalDirection>,
     #[allow(dead_code)] // future: player sprite rendering
     pub transport: u8,
     /// Upper-left coordinates of the loaded 32x32 map window.
     ///
-    /// Combat can leave these bytes holding the prior overworld chunk origin,
-    /// so treat them as meaningful only for non-combat local scenes.
+    /// Combat and dungeon scenes can leave these bytes holding the prior
+    /// overworld chunk origin, so treat them as meaningful only for overworld
+    /// and surface-interior local scenes.
     pub scroll_x: u8,
     pub scroll_y: u8,
-    /// Raw 32x32 tile buffer read from game memory.
+    /// Primary terrain buffer for the current scene.
+    ///
+    /// Overworld and settlement scenes use the full 32x32 byte grid. Dungeon
+    /// scenes copy only the current 8x8 floor into the first 64 bytes.
     pub tiles: [u8; MAP_TILES_LEN],
     /// Raw combat terrain scratch buffer, when the current scene is combat.
     pub combat_tiles: Option<[u8; COMBAT_TERRAIN_LEN]>,
@@ -178,12 +208,33 @@ pub fn read_map_state(mem: &dyn MemoryAccess, dos_base: usize) -> Result<MapStat
     let z = mem.read_u8(inv_addr(dos_base, MAP_Z))?;
     let x = mem.read_u8(inv_addr(dos_base, MAP_X))?;
     let y = mem.read_u8(inv_addr(dos_base, MAP_Y))?;
+    let dungeon_facing = matches!(location, LocationType::Dungeon(_))
+        .then(|| mem.read_u8(inv_addr(dos_base, DUNGEON_ORIENTATION)).ok())
+        .flatten()
+        .and_then(CardinalDirection::from_dungeon_byte);
     let transport = mem.read_u8(inv_addr(dos_base, MAP_TRANSPORT))?;
     let scroll_x = mem.read_u8(inv_addr(dos_base, MAP_SCROLL_X))?;
     let scroll_y = mem.read_u8(inv_addr(dos_base, MAP_SCROLL_Y))?;
 
     let mut tiles = [0u8; MAP_TILES_LEN];
-    mem.read_bytes(inv_addr(dos_base, MAP_TILES), &mut tiles)?;
+    match location {
+        LocationType::Dungeon(_) => {
+            let mut dungeon = [0u8; DUNGEON_TILES_LEN];
+            debug_assert_eq!(
+                ds_addr(dos_base, DUNGEON_TILES_DS_OFFSET),
+                inv_addr(dos_base, DUNGEON_TILES_SAVE_OFFSET),
+                "dungeon terrain buffer DS/save aliases drifted"
+            );
+            mem.read_bytes(inv_addr(dos_base, DUNGEON_TILES_SAVE_OFFSET), &mut dungeon)?;
+            // Clamp the floor byte read from live game memory before slicing the packed 8x8x8
+            // dungeon buffer so unexpected values degrade to the nearest valid floor instead of
+            // indexing past the current dungeon data.
+            let level = usize::from(z).min(DUNGEON_FLOORS - 1);
+            let src = level * DUNGEON_LEVEL_LEN;
+            tiles[..DUNGEON_LEVEL_LEN].copy_from_slice(&dungeon[src..src + DUNGEON_LEVEL_LEN]);
+        }
+        _ => mem.read_bytes(inv_addr(dos_base, MAP_TILES), &mut tiles)?,
+    }
 
     let combat_tiles = if matches!(location, LocationType::Combat(_)) {
         let mut tiles = [0u8; COMBAT_TERRAIN_LEN];
@@ -200,6 +251,7 @@ pub fn read_map_state(mem: &dyn MemoryAccess, dos_base: usize) -> Result<MapStat
         z,
         x,
         y,
+        dungeon_facing,
         transport,
         scroll_x,
         scroll_y,
@@ -265,6 +317,10 @@ mod tests {
             TileGridEncoding::Chunked16x16
         );
         assert_eq!(
+            LocationType::Dungeon(34).tile_grid_encoding(),
+            TileGridEncoding::Dungeon8x8
+        );
+        assert_eq!(
             LocationType::Combat(0x80).tile_grid_encoding(),
             TileGridEncoding::Combat11x11Stride32
         );
@@ -299,6 +355,7 @@ mod tests {
         assert_eq!(state.z, 0xFF);
         assert_eq!(state.x, 100);
         assert_eq!(state.y, 50);
+        assert_eq!(state.dungeon_facing, None);
         assert_eq!(state.tiles[0], 0x01); // water
         assert_eq!(state.tiles[1], 0x05); // grass
         assert!(state.combat_tiles.is_none());
@@ -331,5 +388,131 @@ mod tests {
         assert_eq!(state.location, LocationType::Combat(0xFF));
         assert_eq!(combat_tiles[0], 0);
         assert_eq!(combat_tiles[1], 1);
+    }
+
+    #[test]
+    fn read_dungeon_state_reads_dedicated_dungeon_grid() {
+        let mock = MockMemory::new(0x40000);
+
+        let base = SAVE_BASE;
+        mock.write_u8(base + MAP_LOCATION, 34).unwrap();
+        mock.write_u8(base + MAP_Z, 0).unwrap();
+        mock.write_u8(base + MAP_X, 1).unwrap();
+        mock.write_u8(base + MAP_Y, 2).unwrap();
+        mock.write_u8(base + DUNGEON_ORIENTATION, 2).unwrap();
+        mock.write_u8(base + MAP_TRANSPORT, 0).unwrap();
+
+        for i in 0..MAP_TILES_LEN {
+            mock.write_u8(base + MAP_TILES + i, 0x05).unwrap();
+        }
+        for i in 0..DUNGEON_TILES_LEN {
+            mock.write_u8(base + DUNGEON_TILES_SAVE_OFFSET + i, (i % 251) as u8)
+                .unwrap();
+        }
+
+        let state = read_map_state(&mock, 0).unwrap();
+        assert_eq!(state.location, LocationType::Dungeon(34));
+        assert_eq!(state.dungeon_facing, Some(CardinalDirection::South));
+        assert_eq!(state.tiles[0], 0);
+        assert_eq!(state.tiles[DUNGEON_LEVEL_LEN - 1], 63);
+        assert_eq!(state.tiles[DUNGEON_LEVEL_LEN], 0);
+    }
+
+    #[test]
+    fn read_dungeon_state_selects_current_floor() {
+        let mock = MockMemory::new(0x40000);
+
+        let base = SAVE_BASE;
+        mock.write_u8(base + MAP_LOCATION, 34).unwrap();
+        mock.write_u8(base + MAP_Z, 3).unwrap();
+        mock.write_u8(base + MAP_X, 1).unwrap();
+        mock.write_u8(base + MAP_Y, 2).unwrap();
+        mock.write_u8(base + DUNGEON_ORIENTATION, 1).unwrap();
+        mock.write_u8(base + MAP_TRANSPORT, 0).unwrap();
+
+        for i in 0..DUNGEON_TILES_LEN {
+            mock.write_u8(
+                base + DUNGEON_TILES_SAVE_OFFSET + i,
+                (i / DUNGEON_LEVEL_LEN) as u8,
+            )
+            .unwrap();
+        }
+
+        let state = read_map_state(&mock, 0).unwrap();
+        assert_eq!(state.dungeon_facing, Some(CardinalDirection::East));
+        assert_eq!(state.tiles[0], 3);
+        assert_eq!(state.tiles[DUNGEON_LEVEL_LEN - 1], 3);
+    }
+
+    #[test]
+    fn read_dungeon_state_clamps_out_of_range_floor_to_last_floor() {
+        let mock = MockMemory::new(0x40000);
+
+        let base = SAVE_BASE;
+        mock.write_u8(base + MAP_LOCATION, 34).unwrap();
+        mock.write_u8(base + MAP_Z, 0xFF).unwrap();
+        mock.write_u8(base + MAP_X, 1).unwrap();
+        mock.write_u8(base + MAP_Y, 2).unwrap();
+        mock.write_u8(base + DUNGEON_ORIENTATION, 0).unwrap();
+        mock.write_u8(base + MAP_TRANSPORT, 0).unwrap();
+
+        for i in 0..DUNGEON_TILES_LEN {
+            mock.write_u8(
+                base + DUNGEON_TILES_SAVE_OFFSET + i,
+                (i / DUNGEON_LEVEL_LEN) as u8,
+            )
+            .unwrap();
+        }
+
+        let state = read_map_state(&mock, 0).unwrap();
+        let expected = (DUNGEON_FLOORS - 1) as u8;
+        assert_eq!(state.dungeon_facing, Some(CardinalDirection::North));
+        assert_eq!(state.tiles[0], expected);
+        assert_eq!(state.tiles[DUNGEON_LEVEL_LEN - 1], expected);
+    }
+
+    #[test]
+    fn dungeon_orientation_byte_maps_to_cardinal_direction() {
+        assert_eq!(
+            CardinalDirection::from_dungeon_byte(0),
+            Some(CardinalDirection::North)
+        );
+        assert_eq!(
+            CardinalDirection::from_dungeon_byte(1),
+            Some(CardinalDirection::East)
+        );
+        assert_eq!(
+            CardinalDirection::from_dungeon_byte(2),
+            Some(CardinalDirection::South)
+        );
+        assert_eq!(
+            CardinalDirection::from_dungeon_byte(3),
+            Some(CardinalDirection::West)
+        );
+        assert_eq!(CardinalDirection::from_dungeon_byte(4), None);
+    }
+
+    #[test]
+    fn read_objects_preserves_primary_tile_and_position() {
+        let mock = MockMemory::new(0x40000);
+
+        let base = SAVE_BASE;
+        mock.write_u8(base + MAP_LOCATION, 34).unwrap();
+        mock.write_u8(base + MAP_Z, 0).unwrap();
+        mock.write_u8(base + MAP_X, 1).unwrap();
+        mock.write_u8(base + MAP_Y, 2).unwrap();
+        mock.write_u8(base + MAP_TRANSPORT, 0).unwrap();
+        mock.write_u8(base + OBJECT_TABLE + OBJ_TILE1, 0x01)
+            .unwrap();
+        mock.write_u8(base + OBJECT_TABLE + OBJ_X, 4).unwrap();
+        mock.write_u8(base + OBJECT_TABLE + OBJ_Y, 5).unwrap();
+        mock.write_u8(base + OBJECT_TABLE + OBJ_FLOOR, 0).unwrap();
+
+        let state = read_map_state(&mock, 0).unwrap();
+        let obj = state.objects.first().unwrap();
+        assert_eq!(obj.tile, 0x01);
+        assert_eq!(obj.x, 4);
+        assert_eq!(obj.y, 5);
+        assert_eq!(obj.floor, 0);
     }
 }

@@ -32,6 +32,22 @@ pub const MAP_X: usize = 0x2F0;
 pub const MAP_Y: usize = 0x2F1;
 pub const MAP_SCROLL_X: usize = 0x2F5;
 pub const MAP_SCROLL_Y: usize = 0x2F6;
+/// Dungeon-facing orientation: 0=north, 1=east, 2=south, 3=west.
+pub const DUNGEON_ORIENTATION: usize = 0x105D;
+/// Save-relative alias for the active dungeon terrain buffer.
+///
+/// The live DATA.OVL dungeon buffer is mirrored into SAVED.GAM at this offset,
+/// so code that reads via [`inv_addr`] should use this constant.
+pub const DUNGEON_TILES_SAVE_OFFSET: usize = 0x3B4;
+/// DATA.OVL-relative offset for the active dungeon terrain buffer (`DS:0x595A`).
+///
+/// Code that reads the live buffer via [`ds_addr`] should use this constant.
+pub const DUNGEON_TILES_DS_OFFSET: usize = 0x595A;
+pub const DUNGEON_FLOORS: usize = 8;
+pub const DUNGEON_LEVEL_WIDTH: usize = 8;
+pub const DUNGEON_LEVEL_HEIGHT: usize = 8;
+pub const DUNGEON_LEVEL_LEN: usize = DUNGEON_LEVEL_WIDTH * DUNGEON_LEVEL_HEIGHT;
+pub const DUNGEON_TILES_LEN: usize = DUNGEON_FLOORS * DUNGEON_LEVEL_LEN;
 pub const MAP_TILES: usize = 0x1062;
 pub const MAP_TILES_LEN: usize = 1024;
 
@@ -70,15 +86,10 @@ pub const OBJECT_ENTRY_SIZE: usize = 8;
 
 // Object entry field offsets within each 8-byte entry
 pub const OBJ_TILE1: usize = 0; // sprite tile (add 0x100 for full index)
-#[allow(dead_code)] // included for completeness with the 8-byte entry format
-pub const OBJ_TILE2: usize = 1; // animation frame tile
 pub const OBJ_X: usize = 2;
 pub const OBJ_Y: usize = 3;
-#[allow(dead_code)] // included for completeness with the 8-byte entry format
 pub const OBJ_FLOOR: usize = 4;
 pub const OBJ_DEPENDS1: usize = 5; // frigate: hull HP
-#[allow(dead_code)] // included for completeness with the 8-byte entry format
-pub const OBJ_DEPENDS2: usize = 6;
 pub const OBJ_DEPENDS3: usize = 7; // frigate: skiffs aboard
 
 // Frigate tile byte ranges (sprite index minus 0x100):
@@ -168,6 +179,7 @@ pub fn label_for_save_offset(offset: usize) -> Option<&'static str> {
         0x300 => Some("light_spell_dur"),
         0x301 => Some("torch_dur"),
         NEW_PROMPT => Some("NEW_PROMPT"),
+        DUNGEON_ORIENTATION => Some("dungeon_orientation"),
         SHRINE_ORDAINED => Some("shrine_ordained"),
         SHRINE_CODEX_VISITED => Some("shrine_codex_visited"),
         _ => None,
@@ -210,5 +222,9 @@ mod tests {
         assert_eq!(ds_addr(0, DATA_SEG_MAP_TILES), inv_addr(0, MAP_TILES));
         assert_eq!(ds_addr(0, 0x5896), inv_addr(0, MAP_X));
         assert_eq!(ds_addr(0, 0x5897), inv_addr(0, MAP_Y));
+        assert_eq!(
+            ds_addr(0, DUNGEON_TILES_DS_OFFSET),
+            inv_addr(0, DUNGEON_TILES_SAVE_OFFSET)
+        );
     }
 }
