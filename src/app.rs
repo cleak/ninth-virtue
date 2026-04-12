@@ -341,42 +341,28 @@ impl UltimaCompanion {
         let mem: &dyn MemoryAccess = &attached.process.memory;
         let mut game_written = false;
 
-        match read_party(mem, dos_base) {
-            Ok(p) => self.party = p,
-            Err(e) => {
-                self.status_msg = format!("Read party failed: {e}");
+        match Self::refresh_party_cache(mem, dos_base, &self.party_locks, &self.party) {
+            Ok((party, wrote)) => {
+                self.party = party;
+                game_written |= wrote;
+            }
+            Err((msg, party)) => {
+                self.party = party;
+                self.status_msg = msg;
                 return;
             }
         }
 
-        if self.party_locks.any_active() {
-            for ch in &mut self.party {
-                if apply_party_locks(ch, &self.party_locks) {
-                    if let Err(e) = write_character(mem, dos_base, ch) {
-                        self.status_msg = format!("Write character failed: {e}");
-                        return;
-                    }
-                    game_written = true;
-                }
+        match Self::refresh_inventory_cache(mem, dos_base, &self.inventory_locks, &self.inventory) {
+            Ok((inventory, wrote)) => {
+                self.inventory = inventory;
+                game_written |= wrote;
             }
-        }
-
-        match read_inventory(mem, dos_base) {
-            Ok(inv) => self.inventory = inv,
-            Err(e) => {
-                self.status_msg = format!("Read inventory failed: {e}");
+            Err((msg, inventory)) => {
+                self.inventory = inventory;
+                self.status_msg = msg;
                 return;
             }
-        }
-
-        if self.inventory_locks.any_active()
-            && apply_inventory_locks(&mut self.inventory, &self.inventory_locks)
-        {
-            if let Err(e) = write_inventory(mem, dos_base, &self.inventory) {
-                self.status_msg = format!("Write inventory failed: {e}");
-                return;
-            }
-            game_written = true;
         }
 
         match read_shrine_quest(mem, dos_base) {
@@ -412,6 +398,73 @@ impl UltimaCompanion {
         self.try_acquire_audio(pid);
 
         self.last_refresh = Instant::now();
+    }
+
+    fn refresh_party_cache(
+        mem: &dyn MemoryAccess,
+        dos_base: usize,
+        locks: &PartyLocks,
+        current_party: &[Character],
+    ) -> std::result::Result<(Vec<Character>, bool), (String, Vec<Character>)> {
+        let mut party = read_party(mem, dos_base)
+            .map_err(|e| (format!("Read party failed: {e}"), current_party.to_vec()))?;
+        let mut wrote = false;
+
+        if locks.any_active() {
+            for ch in &mut party {
+                if apply_party_locks(ch, locks) {
+                    if let Err(e) = write_character(mem, dos_base, ch) {
+                        return Err((
+                            format!("Write character failed: {e}"),
+                            Self::restore_party_cache(mem, dos_base, party),
+                        ));
+                    }
+                    wrote = true;
+                }
+            }
+        }
+
+        Ok((party, wrote))
+    }
+
+    fn restore_party_cache(
+        mem: &dyn MemoryAccess,
+        dos_base: usize,
+        fallback: Vec<Character>,
+    ) -> Vec<Character> {
+        read_party(mem, dos_base).unwrap_or(fallback)
+    }
+
+    fn refresh_inventory_cache(
+        mem: &dyn MemoryAccess,
+        dos_base: usize,
+        locks: &InventoryLocks,
+        current_inventory: &Inventory,
+    ) -> std::result::Result<(Inventory, bool), (String, Inventory)> {
+        let mut inventory = read_inventory(mem, dos_base).map_err(|e| {
+            (
+                format!("Read inventory failed: {e}"),
+                current_inventory.clone(),
+            )
+        })?;
+        let wrote = locks.any_active() && apply_inventory_locks(&mut inventory, locks);
+
+        if wrote && let Err(e) = write_inventory(mem, dos_base, &inventory) {
+            return Err((
+                format!("Write inventory failed: {e}"),
+                Self::restore_inventory_cache(mem, dos_base, inventory),
+            ));
+        }
+
+        Ok((inventory, wrote))
+    }
+
+    fn restore_inventory_cache(
+        mem: &dyn MemoryAccess,
+        dos_base: usize,
+        fallback: Inventory,
+    ) -> Inventory {
+        read_inventory(mem, dos_base).unwrap_or(fallback)
     }
 
     fn has_active_locks(&self) -> bool {
@@ -626,6 +679,83 @@ impl eframe::App for UltimaCompanion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::character::{CharClass, Gender, Status, read_party};
+    use crate::game::inventory::read_inventory;
+    use crate::game::offsets::{
+        CHAR_CLASS, CHAR_DEX, CHAR_EQUIPMENT, CHAR_GENDER, CHAR_HP, CHAR_INT, CHAR_LEVEL,
+        CHAR_MAX_HP, CHAR_MP, CHAR_NAME, CHAR_STATUS, CHAR_STR, CHAR_XP, INV_ARROWS, INV_FOOD,
+        INV_GEMS, INV_GOLD, INV_KARMA, INV_KEYS, INV_PARTY_SIZE, INV_REAGENTS, INV_TORCHES,
+        SAVE_BASE, char_addr, inv_addr,
+    };
+    use crate::memory::access::MockMemory;
+    use anyhow::{Result, bail};
+    use std::cell::RefCell;
+
+    struct FailingMemory {
+        inner: MockMemory,
+        fail_after_write: usize,
+        writes: RefCell<usize>,
+    }
+
+    impl FailingMemory {
+        fn new(size: usize, fail_after_write: usize) -> Self {
+            Self {
+                inner: MockMemory::new(size),
+                fail_after_write,
+                writes: RefCell::new(0),
+            }
+        }
+
+        fn set_bytes(&self, addr: usize, bytes: &[u8]) {
+            self.inner.set_bytes(addr, bytes);
+        }
+    }
+
+    impl MemoryAccess for FailingMemory {
+        fn read_bytes(&self, addr: usize, buf: &mut [u8]) -> Result<()> {
+            self.inner.read_bytes(addr, buf)
+        }
+
+        fn write_bytes(&self, addr: usize, data: &[u8]) -> Result<()> {
+            let mut writes = self.writes.borrow_mut();
+            *writes += 1;
+            self.inner.write_bytes(addr, data)?;
+            if *writes >= self.fail_after_write {
+                bail!("forced write failure");
+            }
+            Ok(())
+        }
+    }
+
+    fn seed_party_memory(mem: &FailingMemory) {
+        mem.set_bytes(inv_addr(0, INV_PARTY_SIZE), &[1]);
+
+        let c0 = char_addr(0, 0, 0);
+        mem.set_bytes(c0 + CHAR_NAME, b"Iolo\0\0\0\0\0");
+        mem.set_bytes(c0 + CHAR_GENDER, &[u8::from(Gender::Male)]);
+        mem.set_bytes(c0 + CHAR_CLASS, &[u8::from(CharClass::Bard)]);
+        mem.set_bytes(c0 + CHAR_STATUS, &[u8::from(Status::Asleep)]);
+        mem.set_bytes(c0 + CHAR_STR, &[20]);
+        mem.set_bytes(c0 + CHAR_DEX, &[20]);
+        mem.set_bytes(c0 + CHAR_INT, &[20]);
+        mem.set_bytes(c0 + CHAR_MP, &[12]);
+        mem.set_bytes(c0 + CHAR_HP, &45u16.to_le_bytes());
+        mem.set_bytes(c0 + CHAR_MAX_HP, &90u16.to_le_bytes());
+        mem.set_bytes(c0 + CHAR_XP, &1000u16.to_le_bytes());
+        mem.set_bytes(c0 + CHAR_LEVEL, &[4]);
+        mem.set_bytes(c0 + CHAR_EQUIPMENT, &[0; 6]);
+    }
+
+    fn seed_inventory_memory(mem: &FailingMemory) {
+        mem.set_bytes(inv_addr(0, INV_FOOD), &500u16.to_le_bytes());
+        mem.set_bytes(inv_addr(0, INV_GOLD), &1200u16.to_le_bytes());
+        mem.set_bytes(inv_addr(0, INV_KEYS), &[3]);
+        mem.set_bytes(inv_addr(0, INV_GEMS), &[5]);
+        mem.set_bytes(inv_addr(0, INV_TORCHES), &[10]);
+        mem.set_bytes(inv_addr(0, INV_ARROWS), &[99]);
+        mem.set_bytes(inv_addr(0, INV_REAGENTS), &[10, 20, 30, 40, 5, 15, 25, 35]);
+        mem.set_bytes(inv_addr(0, INV_KARMA), &[75]);
+    }
 
     fn test_app() -> UltimaCompanion {
         let mut memory_watch = MemoryWatch::default();
@@ -715,5 +845,73 @@ mod tests {
         app.auto_refresh = false;
 
         assert_eq!(app.refresh_interval(), None);
+    }
+
+    #[test]
+    fn refresh_party_cache_restores_authoritative_state_after_failed_write() {
+        let mem = FailingMemory::new(SAVE_BASE + 0x300, 8);
+        seed_party_memory(&mem);
+
+        let mut app = test_app();
+        app.party = vec![Character {
+            index: 0,
+            name: "Stale".to_string(),
+            gender: Gender::Female,
+            class: CharClass::Mage,
+            status: Status::Dead,
+            str_: 1,
+            dex: 1,
+            int: 1,
+            mp: 1,
+            hp: 1,
+            max_hp: 1,
+            xp: 1,
+            level: 1,
+            equipment: [0; 6],
+        }];
+        app.party_locks = PartyLocks {
+            mana: true,
+            health: true,
+        };
+
+        let (err, party) =
+            UltimaCompanion::refresh_party_cache(&mem, 0, &app.party_locks, &app.party)
+                .unwrap_err();
+        app.party = party;
+
+        assert_eq!(err, "Write character failed: forced write failure");
+        assert_eq!(app.party, read_party(&mem, 0).unwrap());
+        assert_eq!(app.party[0].status, Status::Good);
+        assert_eq!(app.party[0].mp, 99);
+        assert_eq!(app.party[0].hp, 45);
+    }
+
+    #[test]
+    fn refresh_inventory_cache_restores_authoritative_state_after_failed_write() {
+        let mem = FailingMemory::new(SAVE_BASE + 0x300, 1);
+        seed_inventory_memory(&mem);
+
+        let mut app = test_app();
+        app.inventory = Inventory {
+            food: 1,
+            gold: 1,
+            keys: 1,
+            gems: 1,
+            torches: 1,
+            arrows: 1,
+            reagents: [1; 8],
+            karma: 1,
+        };
+        app.inventory_locks.food = true;
+
+        let (err, inventory) =
+            UltimaCompanion::refresh_inventory_cache(&mem, 0, &app.inventory_locks, &app.inventory)
+                .unwrap_err();
+        app.inventory = inventory;
+
+        assert_eq!(err, "Write inventory failed: forced write failure");
+        assert_eq!(app.inventory, read_inventory(&mem, 0).unwrap());
+        assert_eq!(app.inventory.food, 9999);
+        assert_eq!(app.inventory.gold, 1200);
     }
 }
