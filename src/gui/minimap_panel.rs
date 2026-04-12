@@ -32,16 +32,11 @@ const DUNGEON_CORNER_VIEW_PREF_FILE: &str = "minimap_dungeon_corner_view.txt";
 
 /// Controls whether the dungeon minimap's main panel follows the player or
 /// shows the canonical fixed 8x8 floor layout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum DungeonPrimaryView {
+    #[default]
     Centered,
     Fixed,
-}
-
-impl Default for DungeonPrimaryView {
-    fn default() -> Self {
-        Self::Centered
-    }
 }
 
 impl DungeonPrimaryView {

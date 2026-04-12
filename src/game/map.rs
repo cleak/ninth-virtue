@@ -2,10 +2,10 @@ use anyhow::Result;
 
 use crate::game::offsets::{
     COMBAT_TERRAIN_GRID, COMBAT_TERRAIN_LEN, DUNGEON_FLOORS, DUNGEON_LEVEL_LEN,
-    DUNGEON_ORIENTATION, DUNGEON_TILES_LEN, DUNGEON_TILES_SAVE_OFFSET, MAP_LOCATION, MAP_SCROLL_X,
-    MAP_SCROLL_Y, MAP_TILES, MAP_TILES_LEN, MAP_TRANSPORT, MAP_X, MAP_Y, MAP_Z, OBJ_FLOOR,
-    OBJ_TILE1, OBJ_X, OBJ_Y, OBJECT_ENTRY_SIZE, OBJECT_TABLE, OBJECT_TABLE_SLOTS, ds_addr,
-    inv_addr,
+    DUNGEON_ORIENTATION, DUNGEON_TILES_DS_OFFSET, DUNGEON_TILES_LEN, DUNGEON_TILES_SAVE_OFFSET,
+    MAP_LOCATION, MAP_SCROLL_X, MAP_SCROLL_Y, MAP_TILES, MAP_TILES_LEN, MAP_TRANSPORT, MAP_X,
+    MAP_Y, MAP_Z, OBJ_FLOOR, OBJ_TILE1, OBJ_X, OBJ_Y, OBJECT_ENTRY_SIZE, OBJECT_TABLE,
+    OBJECT_TABLE_SLOTS, ds_addr, inv_addr,
 };
 use crate::memory::access::MemoryAccess;
 
@@ -220,6 +220,11 @@ pub fn read_map_state(mem: &dyn MemoryAccess, dos_base: usize) -> Result<MapStat
     match location {
         LocationType::Dungeon(_) => {
             let mut dungeon = [0u8; DUNGEON_TILES_LEN];
+            debug_assert_eq!(
+                ds_addr(dos_base, DUNGEON_TILES_DS_OFFSET),
+                inv_addr(dos_base, DUNGEON_TILES_SAVE_OFFSET),
+                "dungeon terrain buffer DS/save aliases drifted"
+            );
             mem.read_bytes(inv_addr(dos_base, DUNGEON_TILES_SAVE_OFFSET), &mut dungeon)?;
             // Clamp the floor byte read from live game memory before slicing the packed 8x8x8
             // dungeon buffer so unexpected values degrade to the nearest valid floor instead of
