@@ -369,7 +369,9 @@ impl UltimaCompanion {
             }
         }
 
-        if apply_inventory_locks(&mut self.inventory, &self.inventory_locks) {
+        if self.inventory_locks.any_active()
+            && apply_inventory_locks(&mut self.inventory, &self.inventory_locks)
+        {
             if let Err(e) = write_inventory(mem, dos_base, &self.inventory) {
                 self.status_msg = format!("Write inventory failed: {e}");
                 return;
