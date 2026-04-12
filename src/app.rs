@@ -528,7 +528,13 @@ impl eframe::App for UltimaCompanion {
         egui::CentralPanel::default().show_inside(ui, |ui| {
             gui::section_frame(ui).show(ui, |ui| {
                 ui.set_min_size(ui.available_size());
-                if let Some(atlas) = tile_atlas.as_ref() {
+                let dungeon_map_loaded = minimap
+                    .map
+                    .as_ref()
+                    .is_some_and(|map| matches!(map.location, map::LocationType::Dungeon(_)));
+                if dungeon_map_loaded {
+                    gui::minimap_panel::show_dungeon_without_atlas(ui, minimap);
+                } else if let Some(atlas) = tile_atlas.as_ref() {
                     gui::minimap_panel::show(ui, minimap, atlas, world_map.as_ref());
                 } else if attached.is_some() {
                     // Only show load errors when actually attached to a process

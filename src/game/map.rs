@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::game::offsets::{
     COMBAT_TERRAIN_GRID, COMBAT_TERRAIN_LEN, DUNGEON_FLOORS, DUNGEON_LEVEL_LEN,
-    DUNGEON_ORIENTATION, DUNGEON_TILES, DUNGEON_TILES_LEN, MAP_LOCATION, MAP_SCROLL_X,
+    DUNGEON_ORIENTATION, DUNGEON_TILES_LEN, DUNGEON_TILES_SAVE_OFFSET, MAP_LOCATION, MAP_SCROLL_X,
     MAP_SCROLL_Y, MAP_TILES, MAP_TILES_LEN, MAP_TRANSPORT, MAP_X, MAP_Y, MAP_Z, OBJ_FLOOR,
     OBJ_TILE1, OBJ_X, OBJ_Y, OBJECT_ENTRY_SIZE, OBJECT_TABLE, OBJECT_TABLE_SLOTS, ds_addr,
     inv_addr,
@@ -19,6 +19,7 @@ pub enum CardinalDirection {
 }
 
 impl CardinalDirection {
+    /// Convert Ultima V's dungeon-facing byte into a cardinal direction.
     pub fn from_dungeon_byte(byte: u8) -> Option<Self> {
         match byte {
             0 => Some(Self::North),
@@ -219,7 +220,7 @@ pub fn read_map_state(mem: &dyn MemoryAccess, dos_base: usize) -> Result<MapStat
     match location {
         LocationType::Dungeon(_) => {
             let mut dungeon = [0u8; DUNGEON_TILES_LEN];
-            mem.read_bytes(inv_addr(dos_base, DUNGEON_TILES), &mut dungeon)?;
+            mem.read_bytes(inv_addr(dos_base, DUNGEON_TILES_SAVE_OFFSET), &mut dungeon)?;
             let level = usize::from(z).min(DUNGEON_FLOORS - 1);
             let src = level * DUNGEON_LEVEL_LEN;
             tiles[..DUNGEON_LEVEL_LEN].copy_from_slice(&dungeon[src..src + DUNGEON_LEVEL_LEN]);
@@ -397,7 +398,7 @@ mod tests {
             mock.write_u8(base + MAP_TILES + i, 0x05).unwrap();
         }
         for i in 0..DUNGEON_TILES_LEN {
-            mock.write_u8(base + DUNGEON_TILES + i, (i % 251) as u8)
+            mock.write_u8(base + DUNGEON_TILES_SAVE_OFFSET + i, (i % 251) as u8)
                 .unwrap();
         }
 
@@ -422,8 +423,11 @@ mod tests {
         mock.write_u8(base + MAP_TRANSPORT, 0).unwrap();
 
         for i in 0..DUNGEON_TILES_LEN {
-            mock.write_u8(base + DUNGEON_TILES + i, (i / DUNGEON_LEVEL_LEN) as u8)
-                .unwrap();
+            mock.write_u8(
+                base + DUNGEON_TILES_SAVE_OFFSET + i,
+                (i / DUNGEON_LEVEL_LEN) as u8,
+            )
+            .unwrap();
         }
 
         let state = read_map_state(&mock, 0).unwrap();

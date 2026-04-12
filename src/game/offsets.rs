@@ -34,8 +34,15 @@ pub const MAP_SCROLL_X: usize = 0x2F5;
 pub const MAP_SCROLL_Y: usize = 0x2F6;
 /// Dungeon-facing orientation: 0=north, 1=east, 2=south, 3=west.
 pub const DUNGEON_ORIENTATION: usize = 0x105D;
-/// Runtime-only 32x32 dungeon terrain buffer (DS:0x595A).
-pub const DUNGEON_TILES: usize = 0x3B4;
+/// Save-relative alias for the active dungeon terrain buffer.
+///
+/// The live DATA.OVL dungeon buffer is mirrored into SAVED.GAM at this offset,
+/// so code that reads via [`inv_addr`] should use this constant.
+pub const DUNGEON_TILES_SAVE_OFFSET: usize = 0x3B4;
+/// DATA.OVL-relative offset for the active dungeon terrain buffer (`DS:0x595A`).
+///
+/// Code that reads the live buffer via [`ds_addr`] should use this constant.
+pub const DUNGEON_TILES_DS_OFFSET: usize = 0x595A;
 pub const DUNGEON_FLOORS: usize = 8;
 pub const DUNGEON_LEVEL_WIDTH: usize = 8;
 pub const DUNGEON_LEVEL_HEIGHT: usize = 8;
@@ -215,5 +222,9 @@ mod tests {
         assert_eq!(ds_addr(0, DATA_SEG_MAP_TILES), inv_addr(0, MAP_TILES));
         assert_eq!(ds_addr(0, 0x5896), inv_addr(0, MAP_X));
         assert_eq!(ds_addr(0, 0x5897), inv_addr(0, MAP_Y));
+        assert_eq!(
+            ds_addr(0, DUNGEON_TILES_DS_OFFSET),
+            inv_addr(0, DUNGEON_TILES_SAVE_OFFSET)
+        );
     }
 }

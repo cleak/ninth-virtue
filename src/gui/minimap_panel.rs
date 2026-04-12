@@ -30,6 +30,8 @@ const PLAYER_FACING_ARROW_WIDTH: f32 = 6.0;
 const DUNGEON_VIEW_PREF_FILE: &str = "minimap_dungeon_view.txt";
 const DUNGEON_CORNER_VIEW_PREF_FILE: &str = "minimap_dungeon_corner_view.txt";
 
+/// Controls whether the dungeon minimap's main panel follows the player or
+/// shows the canonical fixed 8x8 floor layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DungeonPrimaryView {
     Centered,
@@ -198,24 +200,29 @@ impl MinimapState {
         Self::default()
     }
 
+    /// Load persisted dungeon minimap preferences from the local app-data store.
     pub fn load_persistent_preferences(&mut self) {
         self.dungeon_primary_view = load_dungeon_primary_view();
         self.show_dungeon_corner_view = load_dungeon_corner_view();
     }
 
+    /// Return the currently selected primary dungeon view mode.
     pub fn dungeon_primary_view(&self) -> DungeonPrimaryView {
         self.dungeon_primary_view
     }
 
+    /// Swap the primary and inset dungeon view modes and persist the choice.
     pub fn swap_dungeon_primary_view(&mut self) {
         self.dungeon_primary_view = self.dungeon_primary_view.swapped();
         save_dungeon_primary_view(self.dungeon_primary_view);
     }
 
+    /// Whether the alternate dungeon orientation inset should be shown.
     pub fn show_dungeon_corner_view(&self) -> bool {
         self.show_dungeon_corner_view
     }
 
+    /// Persistently enable or disable the alternate dungeon orientation inset.
     pub fn set_show_dungeon_corner_view(&mut self, visible: bool) {
         self.show_dungeon_corner_view = visible;
         save_dungeon_corner_view(visible);
@@ -239,7 +246,11 @@ impl MinimapState {
     }
 }
 
-/// Render the minimap controls and GL-backed map view for the current snapshot.
+/// Render the minimap controls and the current map view.
+///
+/// Non-dungeon scenes require a tile atlas for the GL-backed terrain path.
+/// Dungeon scenes may instead be rendered through [`show_dungeon_without_atlas`]
+/// when atlas loading fails.
 pub fn show(
     ui: &mut egui::Ui,
     state: &mut MinimapState,
@@ -253,69 +264,9 @@ pub fn show(
         return;
     };
     let is_dungeon = matches!(map.location, LocationType::Dungeon(_));
-
-    // Header
-    let header = if map.z == 0xFF {
-        format!("{} ({}, {})", map.location.name(), map.x, map.y)
-    } else {
-        format!("{} ({}, {}) Z:{}", map.location.name(), map.x, map.y, map.z)
-    };
     let is_overworld = map.location.is_overworld();
 
-    ui.vertical(|ui| {
-        // Keep the changing coordinate text on its own line so movement cannot
-        // reflow the controls row and resize the map panel.
-        ui.add(egui::Label::new(&header).truncate());
-
-        ui.horizontal_wrapped(|ui| {
-            if is_dungeon {
-                ui.label("8x8 dungeon grid");
-                ui.separator();
-                ui.label(state.dungeon_primary_view().title());
-                if ui.small_button("Swap Views").clicked() {
-                    state.swap_dungeon_primary_view();
-                }
-                ui.separator();
-                let mut show_corner_view = state.show_dungeon_corner_view();
-                if ui
-                    .checkbox(&mut show_corner_view, "Show Orientation Inset")
-                    .changed()
-                {
-                    state.set_show_dungeon_corner_view(show_corner_view);
-                }
-            } else {
-                if ui.small_button("\u{2796}").clicked() {
-                    state.zoom = (state.zoom * 4 / 3).min(ZOOM_MAX);
-                }
-                let mut zoom_f = state.zoom as f64;
-                let slider = egui::Slider::new(&mut zoom_f, ZOOM_MAX as f64..=ZOOM_MIN as f64)
-                    .logarithmic(true)
-                    .show_value(false)
-                    .clamping(egui::SliderClamping::Always);
-                if ui.add(slider).changed() {
-                    state.zoom = zoom_f as usize;
-                }
-                if ui.small_button("\u{2795}").clicked() {
-                    state.zoom = (state.zoom * 3 / 4).max(ZOOM_MIN);
-                }
-                ui.label(format!("{}x{}", state.zoom, state.zoom));
-            }
-        });
-
-        if is_overworld && world_map.is_some() {
-            ui.horizontal_wrapped(|ui| {
-                ui.checkbox(&mut state.show_labels, "Labels");
-                ui.add_enabled_ui(state.show_labels, |ui| {
-                    ui.checkbox(&mut state.label_filters.towns, "Towns");
-                    ui.checkbox(&mut state.label_filters.dwellings, "Dwellings");
-                    ui.checkbox(&mut state.label_filters.castles, "Castles");
-                    ui.checkbox(&mut state.label_filters.keeps, "Keeps");
-                    ui.checkbox(&mut state.label_filters.dungeons, "Dungeons");
-                    ui.checkbox(&mut state.label_filters.shrines, "Shrines");
-                });
-            });
-        }
-    });
+    render_minimap_header(ui, state, &map, world_map.is_some());
 
     if is_dungeon {
         show_dungeon_map(ui, state, &map);
@@ -444,10 +395,98 @@ pub fn show(
     });
 }
 
+/// Render the dungeon minimap without requiring a loaded tile atlas.
+pub fn show_dungeon_without_atlas(ui: &mut egui::Ui, state: &mut MinimapState) {
+    let Some(map) = state.map.clone() else {
+        ui.centered_and_justified(|ui| {
+            ui.label("Waiting for map data...");
+        });
+        return;
+    };
+
+    if !matches!(map.location, LocationType::Dungeon(_)) {
+        show_no_atlas(ui, "Tile atlas is unavailable for this scene.");
+        return;
+    }
+
+    render_minimap_header(ui, state, &map, false);
+    show_dungeon_map(ui, state, &map);
+}
+
 /// Render a placeholder when the tile atlas has not been loaded yet.
 pub fn show_no_atlas(ui: &mut egui::Ui, status: &str) {
     ui.centered_and_justified(|ui| {
         ui.label(status);
+    });
+}
+
+fn render_minimap_header(
+    ui: &mut egui::Ui,
+    state: &mut MinimapState,
+    map: &MapState,
+    world_map_loaded: bool,
+) {
+    let is_dungeon = matches!(map.location, LocationType::Dungeon(_));
+    let header = if map.z == 0xFF {
+        format!("{} ({}, {})", map.location.name(), map.x, map.y)
+    } else {
+        format!("{} ({}, {}) Z:{}", map.location.name(), map.x, map.y, map.z)
+    };
+    let is_overworld = map.location.is_overworld();
+
+    ui.vertical(|ui| {
+        // Keep the changing coordinate text on its own line so movement cannot
+        // reflow the controls row and resize the map panel.
+        ui.add(egui::Label::new(&header).truncate());
+
+        ui.horizontal_wrapped(|ui| {
+            if is_dungeon {
+                ui.label("8x8 dungeon grid");
+                ui.separator();
+                ui.label(state.dungeon_primary_view().title());
+                if ui.small_button("Swap Views").clicked() {
+                    state.swap_dungeon_primary_view();
+                }
+                ui.separator();
+                let mut show_corner_view = state.show_dungeon_corner_view();
+                if ui
+                    .checkbox(&mut show_corner_view, "Show Orientation Inset")
+                    .changed()
+                {
+                    state.set_show_dungeon_corner_view(show_corner_view);
+                }
+            } else {
+                if ui.small_button("\u{2796}").clicked() {
+                    state.zoom = (state.zoom * 4 / 3).min(ZOOM_MAX);
+                }
+                let mut zoom_f = state.zoom as f64;
+                let slider = egui::Slider::new(&mut zoom_f, ZOOM_MAX as f64..=ZOOM_MIN as f64)
+                    .logarithmic(true)
+                    .show_value(false)
+                    .clamping(egui::SliderClamping::Always);
+                if ui.add(slider).changed() {
+                    state.zoom = zoom_f as usize;
+                }
+                if ui.small_button("\u{2795}").clicked() {
+                    state.zoom = (state.zoom * 3 / 4).max(ZOOM_MIN);
+                }
+                ui.label(format!("{}x{}", state.zoom, state.zoom));
+            }
+        });
+
+        if is_overworld && world_map_loaded {
+            ui.horizontal_wrapped(|ui| {
+                ui.checkbox(&mut state.show_labels, "Labels");
+                ui.add_enabled_ui(state.show_labels, |ui| {
+                    ui.checkbox(&mut state.label_filters.towns, "Towns");
+                    ui.checkbox(&mut state.label_filters.dwellings, "Dwellings");
+                    ui.checkbox(&mut state.label_filters.castles, "Castles");
+                    ui.checkbox(&mut state.label_filters.keeps, "Keeps");
+                    ui.checkbox(&mut state.label_filters.dungeons, "Dungeons");
+                    ui.checkbox(&mut state.label_filters.shrines, "Shrines");
+                });
+            });
+        }
     });
 }
 
