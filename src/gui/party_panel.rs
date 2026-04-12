@@ -40,10 +40,6 @@ pub fn show(
     mem: Option<(&dyn MemoryAccess, usize)>,
 ) -> bool {
     let mut wrote = false;
-    if party.is_empty() {
-        ui.label("No party data loaded.");
-        return false;
-    }
 
     ui.horizontal(|ui| {
         let gap = ui.spacing().item_spacing.x;
@@ -100,6 +96,11 @@ pub fn show(
             |_| {},
         );
     });
+
+    if party.is_empty() {
+        ui.label("No party data loaded.");
+        return false;
+    }
 
     TableBuilder::new(ui)
         .column(Column::exact(NAME_COL_WIDTH)) // Name

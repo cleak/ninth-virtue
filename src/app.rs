@@ -409,6 +409,24 @@ impl UltimaCompanion {
     fn has_active_locks(&self) -> bool {
         self.party_locks.any_active() || self.inventory_locks.any_active()
     }
+
+    fn refresh_interval(&self) -> Option<Duration> {
+        let locks_active = self.has_active_locks();
+        if !(self.auto_refresh || locks_active) {
+            return None;
+        }
+
+        if self.auto_refresh {
+            let lock_poll_secs = LOCK_POLL_INTERVAL.as_secs_f32();
+            if locks_active && self.refresh_interval_secs >= lock_poll_secs {
+                Some(LOCK_POLL_INTERVAL)
+            } else {
+                Some(Duration::from_secs_f32(self.refresh_interval_secs))
+            }
+        } else {
+            Some(LOCK_POLL_INTERVAL)
+        }
+    }
 }
 
 impl eframe::App for UltimaCompanion {
@@ -441,12 +459,7 @@ impl eframe::App for UltimaCompanion {
                     }
                 }
                 ctx.request_repaint_after(RESCAN_INTERVAL);
-            } else if self.auto_refresh || self.has_active_locks() {
-                let interval = if self.auto_refresh {
-                    Duration::from_secs_f32(self.refresh_interval_secs)
-                } else {
-                    LOCK_POLL_INTERVAL
-                };
+            } else if let Some(interval) = self.refresh_interval() {
                 if self.last_refresh.elapsed() >= interval {
                     self.refresh_game_state();
                 }
@@ -661,5 +674,39 @@ mod tests {
 
         assert!(!app.memory_watch.recording);
         assert_eq!(app.status_msg, "Process terminated");
+    }
+
+    #[test]
+    fn refresh_interval_uses_auto_refresh_when_no_locks_are_active() {
+        let mut app = test_app();
+        app.refresh_interval_secs = 0.25;
+
+        assert_eq!(app.refresh_interval(), Some(Duration::from_secs_f32(0.25)));
+    }
+
+    #[test]
+    fn refresh_interval_is_capped_when_locks_are_active() {
+        let mut app = test_app();
+        app.refresh_interval_secs = 0.25;
+        app.party_locks.mana = true;
+
+        assert_eq!(app.refresh_interval(), Some(LOCK_POLL_INTERVAL));
+    }
+
+    #[test]
+    fn refresh_interval_uses_lock_poll_when_auto_refresh_is_disabled() {
+        let mut app = test_app();
+        app.auto_refresh = false;
+        app.inventory_locks.food = true;
+
+        assert_eq!(app.refresh_interval(), Some(LOCK_POLL_INTERVAL));
+    }
+
+    #[test]
+    fn refresh_interval_is_none_when_auto_refresh_and_locks_are_disabled() {
+        let mut app = test_app();
+        app.auto_refresh = false;
+
+        assert_eq!(app.refresh_interval(), None);
     }
 }

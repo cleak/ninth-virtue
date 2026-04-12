@@ -1,5 +1,7 @@
 use crate::game::character::{Character, Status, write_character};
-use crate::game::inventory::{Inventory, MAX_CONSUMABLE_COUNT, write_inventory};
+use crate::game::inventory::{
+    Inventory, MAX_CONSUMABLE_COUNT, MAX_FOOD, MAX_GOLD, write_inventory,
+};
 use crate::game::offsets::FRIGATE_MAX_HULL;
 use crate::game::vehicle::{Frigate, write_frigate_hull};
 use crate::memory::access::MemoryAccess;
@@ -110,7 +112,7 @@ pub fn show(
         )
         .clicked()
     {
-        inventory.gold = 9999;
+        inventory.gold = MAX_GOLD;
         if let Some((mem, base)) = mem {
             let _ = write_inventory(mem, base, inventory);
             wrote = true;
@@ -126,7 +128,7 @@ pub fn show(
         )
         .clicked()
     {
-        inventory.food = 9999;
+        inventory.food = MAX_FOOD;
         if let Some((mem, base)) = mem {
             let _ = write_inventory(mem, base, inventory);
             wrote = true;
@@ -158,7 +160,7 @@ pub fn show(
         )
         .clicked()
     {
-        inventory.reagents = [99; 8];
+        inventory.reagents = [MAX_CONSUMABLE_COUNT; 8];
         if let Some((mem, base)) = mem {
             let _ = write_inventory(mem, base, inventory);
             wrote = true;
