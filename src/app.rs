@@ -151,9 +151,10 @@ impl UltimaCompanion {
             if !result.game_confirmed {
                 continue;
             }
-            if confirmed_pid.replace(*pid).is_some() {
+            if confirmed_pid.is_some() {
                 return None;
             }
+            confirmed_pid = Some(*pid);
         }
 
         confirmed_pid
