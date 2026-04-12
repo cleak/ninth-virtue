@@ -12,3 +12,8 @@ pub mod quest_panel;
 pub fn section_frame(ui: &egui::Ui) -> egui::Frame {
     egui::Frame::group(ui.style()).inner_margin(8.0)
 }
+
+pub fn infinity_checkbox(ui: &mut egui::Ui, locked: &mut bool, tooltip: &str) -> egui::Response {
+    ui.checkbox(locked, egui::RichText::new("∞"))
+        .on_hover_text(tooltip)
+}
