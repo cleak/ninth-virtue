@@ -71,7 +71,7 @@ struct PlayerMarkerStyle {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct LowpassTileSample {
     rgb: [u8; 3],
-    alpha: u8,
+    coverage: u8,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1195,8 +1195,9 @@ fn build_objects_overlay(
 ///
 /// Palette-0 black in the Ultima V art is mostly outline/shadow detail. Ignore
 /// it while building zoomed-out colors so repeated pixel-art patterns do not
-/// darken the minimap during minification. Animated-page tiles (256-511) also
-/// use the surviving pixel coverage as overlay alpha.
+/// darken the minimap during minification. Keep the surviving coverage for all
+/// tiles so the shader can apply a perceptual brightness correction as those
+/// outline/shadow texels disappear.
 fn build_tile_lowpass_lut(atlas_rgba: &[u8]) -> Vec<LowpassTileSample> {
     assert_eq!(
         atlas_rgba.len(),
@@ -1207,7 +1208,6 @@ fn build_tile_lowpass_lut(atlas_rgba: &[u8]) -> Vec<LowpassTileSample> {
     let mut lut = Vec::with_capacity(TILE_COUNT);
     for tile_idx in 0..TILE_COUNT {
         let tile = &atlas_rgba[tile_idx * TILE_RGBA_BYTES..(tile_idx + 1) * TILE_RGBA_BYTES];
-        let overlay_tile = tile_idx >= 256;
         let mut sum = [0u32; 3];
         let mut opaque_pixels = 0u32;
 
@@ -1222,12 +1222,8 @@ fn build_tile_lowpass_lut(atlas_rgba: &[u8]) -> Vec<LowpassTileSample> {
             opaque_pixels += 1;
         }
 
-        let alpha = if overlay_tile {
-            ((opaque_pixels * 255 + (TILE_SIZE * TILE_SIZE / 2) as u32)
-                / (TILE_SIZE * TILE_SIZE) as u32) as u8
-        } else {
-            u8::MAX
-        };
+        let coverage = ((opaque_pixels * 255 + (TILE_SIZE * TILE_SIZE / 2) as u32)
+            / (TILE_SIZE * TILE_SIZE) as u32) as u8;
 
         let rgb = if opaque_pixels == 0 {
             [0, 0, 0]
@@ -1239,14 +1235,19 @@ fn build_tile_lowpass_lut(atlas_rgba: &[u8]) -> Vec<LowpassTileSample> {
             ]
         };
 
-        lut.push(LowpassTileSample { rgb, alpha });
+        lut.push(LowpassTileSample { rgb, coverage });
     }
 
     lut
 }
 
-/// Build an RGBA low-pass map that stays stable when multiple tiles collapse
-/// into a single screen pixel.
+/// Build a premultiplied RGBA low-pass map that stays stable when multiple
+/// tiles collapse into a single screen pixel.
+///
+/// RGB stores the visible-color average multiplied by non-black coverage, and
+/// alpha stores that coverage directly. The shader uses the coverage channel
+/// to put back the perceived darkness lost when palette-0 black texels are
+/// dropped during minification.
 fn build_lowpass_map(
     grid_data: &[u8],
     objects_data: &[u8],
@@ -1274,26 +1275,36 @@ fn build_lowpass_map(
     let mut lowpass = vec![0u8; texels * 4];
     for idx in 0..texels {
         let terrain = tile_lut[grid_data[idx] as usize];
-        let mut rgb = [
-            terrain.rgb[0] as u32,
-            terrain.rgb[1] as u32,
-            terrain.rgb[2] as u32,
+        let mut coverage = terrain.coverage as u32;
+        let mut premult_rgb = [
+            (terrain.rgb[0] as u32 * coverage + 127) / 255,
+            (terrain.rgb[1] as u32 * coverage + 127) / 255,
+            (terrain.rgb[2] as u32 * coverage + 127) / 255,
         ];
 
         let object_id = objects_data[idx];
         if object_id != 0 {
             let overlay = tile_lut[object_id as usize + 256];
-            let alpha = overlay.alpha as u32;
-            rgb[0] = (rgb[0] * (255 - alpha) + overlay.rgb[0] as u32 * alpha + 127) / 255;
-            rgb[1] = (rgb[1] * (255 - alpha) + overlay.rgb[1] as u32 * alpha + 127) / 255;
-            rgb[2] = (rgb[2] * (255 - alpha) + overlay.rgb[2] as u32 * alpha + 127) / 255;
+            let overlay_coverage = overlay.coverage as u32;
+            let overlay_premult = [
+                (overlay.rgb[0] as u32 * overlay_coverage + 127) / 255,
+                (overlay.rgb[1] as u32 * overlay_coverage + 127) / 255,
+                (overlay.rgb[2] as u32 * overlay_coverage + 127) / 255,
+            ];
+            premult_rgb[0] =
+                (premult_rgb[0] * (255 - overlay_coverage) + 127) / 255 + overlay_premult[0];
+            premult_rgb[1] =
+                (premult_rgb[1] * (255 - overlay_coverage) + 127) / 255 + overlay_premult[1];
+            premult_rgb[2] =
+                (premult_rgb[2] * (255 - overlay_coverage) + 127) / 255 + overlay_premult[2];
+            coverage = (coverage * (255 - overlay_coverage) + 127) / 255 + overlay_coverage;
         }
 
         let out = &mut lowpass[idx * 4..idx * 4 + 4];
-        out[0] = rgb[0] as u8;
-        out[1] = rgb[1] as u8;
-        out[2] = rgb[2] as u8;
-        out[3] = u8::MAX;
+        out[0] = premult_rgb[0].min(255) as u8;
+        out[1] = premult_rgb[1].min(255) as u8;
+        out[2] = premult_rgb[2].min(255) as u8;
+        out[3] = coverage.min(255) as u8;
     }
 
     lowpass
@@ -1856,20 +1867,20 @@ mod tests {
             lut[0],
             LowpassTileSample {
                 rgb: [10, 20, 30],
-                alpha: 255
+                coverage: 255
             }
         );
         assert_eq!(
             lut[256],
             LowpassTileSample {
                 rgb: [200, 100, 50],
-                alpha: 128
+                coverage: 128
             }
         );
     }
 
     #[test]
-    fn lowpass_lut_ignores_black_for_terrain_tiles() {
+    fn lowpass_lut_tracks_terrain_coverage_after_ignoring_black() {
         let mut atlas = vec![0u8; TILE_COUNT * TILE_RGBA_BYTES];
         let terrain = &mut atlas[0..TILE_RGBA_BYTES];
         for (idx, px) in terrain.chunks_exact_mut(4).enumerate() {
@@ -1885,7 +1896,7 @@ mod tests {
             lut[0],
             LowpassTileSample {
                 rgb: [80, 120, 200],
-                alpha: 255
+                coverage: 128
             }
         );
     }
@@ -1895,21 +1906,39 @@ mod tests {
         let mut lut = vec![
             LowpassTileSample {
                 rgb: [0, 0, 0],
-                alpha: 255,
+                coverage: 255,
             };
             TILE_COUNT
         ];
         lut[7] = LowpassTileSample {
             rgb: [20, 40, 60],
-            alpha: 255,
+            coverage: 255,
         };
         lut[256 + 3] = LowpassTileSample {
             rgb: [220, 120, 20],
-            alpha: 128,
+            coverage: 128,
         };
 
         let lowpass = build_lowpass_map(&[7], &[3], &lut, 1, 1);
         assert_eq!(lowpass, vec![120, 80, 40, 255]);
+    }
+
+    #[test]
+    fn lowpass_map_preserves_terrain_coverage_for_brightness_compensation() {
+        let mut lut = vec![
+            LowpassTileSample {
+                rgb: [0, 0, 0],
+                coverage: 255,
+            };
+            TILE_COUNT
+        ];
+        lut[7] = LowpassTileSample {
+            rgb: [80, 120, 200],
+            coverage: 128,
+        };
+
+        let lowpass = build_lowpass_map(&[7], &[0], &lut, 1, 1);
+        assert_eq!(lowpass, vec![40, 60, 100, 128]);
     }
 
     #[test]
