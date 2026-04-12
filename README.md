@@ -64,7 +64,7 @@ Typical workflow:
 
 GitHub Actions publishes tagged Windows releases automatically. Update the version in `Cargo.toml`, then push a matching tag in the form `vX.Y.Z` such as `v0.1.0`. CI verifies that the tag and Cargo version match, then it will:
 
-- run formatting, clippy, and tests
+- run formatting, the no-build-warnings check, clippy, and tests
 - build the release binary
 - package `ninth-virtue.exe` with the README and license files
 - create or update the matching GitHub Release entry and upload the zip asset

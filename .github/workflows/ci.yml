@@ -36,6 +36,10 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Check build warnings
+        shell: pwsh
+        run: ./scripts/check-no-build-warnings.ps1
+
       - name: Run clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
