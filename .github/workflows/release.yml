@@ -13,7 +13,7 @@ env:
 
 jobs:
   windows:
-    runs-on: windows-latest
+    runs-on: windows-2025
     outputs:
       release_archive: ${{ steps.release_meta.outputs.archive_name }}
 
@@ -110,7 +110,7 @@ jobs:
 
   github_release:
     needs: windows
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
 
