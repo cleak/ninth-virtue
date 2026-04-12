@@ -50,7 +50,7 @@ pub enum TileGridEncoding {
     RowMajor32,
     /// Four 16x16 chunks packed sequentially.
     Chunked16x16,
-    /// Dungeon floors are nibble-packed 8x8 semantic cells.
+    /// Dungeon scenes expose one floor-local 8x8 semantic-cell grid as 64 row-major bytes.
     Dungeon8x8,
     /// Combat-only 11x11 active grid with a 32-byte row stride.
     Combat11x11Stride32,
@@ -437,6 +437,33 @@ mod tests {
         assert_eq!(state.dungeon_facing, Some(CardinalDirection::East));
         assert_eq!(state.tiles[0], 3);
         assert_eq!(state.tiles[DUNGEON_LEVEL_LEN - 1], 3);
+    }
+
+    #[test]
+    fn read_dungeon_state_clamps_out_of_range_floor_to_last_floor() {
+        let mock = MockMemory::new(0x40000);
+
+        let base = SAVE_BASE;
+        mock.write_u8(base + MAP_LOCATION, 34).unwrap();
+        mock.write_u8(base + MAP_Z, 0xFF).unwrap();
+        mock.write_u8(base + MAP_X, 1).unwrap();
+        mock.write_u8(base + MAP_Y, 2).unwrap();
+        mock.write_u8(base + DUNGEON_ORIENTATION, 0).unwrap();
+        mock.write_u8(base + MAP_TRANSPORT, 0).unwrap();
+
+        for i in 0..DUNGEON_TILES_LEN {
+            mock.write_u8(
+                base + DUNGEON_TILES_SAVE_OFFSET + i,
+                (i / DUNGEON_LEVEL_LEN) as u8,
+            )
+            .unwrap();
+        }
+
+        let state = read_map_state(&mock, 0).unwrap();
+        let expected = (DUNGEON_FLOORS - 1) as u8;
+        assert_eq!(state.dungeon_facing, Some(CardinalDirection::North));
+        assert_eq!(state.tiles[0], expected);
+        assert_eq!(state.tiles[DUNGEON_LEVEL_LEN - 1], expected);
     }
 
     #[test]
