@@ -221,6 +221,9 @@ pub fn read_map_state(mem: &dyn MemoryAccess, dos_base: usize) -> Result<MapStat
         LocationType::Dungeon(_) => {
             let mut dungeon = [0u8; DUNGEON_TILES_LEN];
             mem.read_bytes(inv_addr(dos_base, DUNGEON_TILES_SAVE_OFFSET), &mut dungeon)?;
+            // Clamp the floor byte read from live game memory before slicing the packed 8x8x8
+            // dungeon buffer so unexpected values degrade to the nearest valid floor instead of
+            // indexing past the current dungeon data.
             let level = usize::from(z).min(DUNGEON_FLOORS - 1);
             let src = level * DUNGEON_LEVEL_LEN;
             tiles[..DUNGEON_LEVEL_LEN].copy_from_slice(&dungeon[src..src + DUNGEON_LEVEL_LEN]);
