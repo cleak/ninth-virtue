@@ -1,10 +1,22 @@
 use egui_extras::{Column, TableBuilder};
 
-use crate::game::character::{Character, Status};
+use crate::game::character::{
+    Character, MAX_MP, PartyLocks, Status, apply_party_locks, write_character,
+};
 use crate::game::map::MapState;
 use crate::game::offsets::FRIGATE_MAX_HULL;
 use crate::game::vehicle::{Frigate, is_frigate_tile, write_frigate_hull, write_frigate_skiffs};
 use crate::memory::access::MemoryAccess;
+
+const NAME_COL_WIDTH: f32 = 70.0;
+const CLASS_COL_WIDTH: f32 = 55.0;
+const STATUS_COL_WIDTH: f32 = 85.0;
+const STAT_COL_WIDTH: f32 = 40.0;
+const MP_COL_WIDTH: f32 = 40.0;
+const HP_COL_WIDTH: f32 = 45.0;
+const MAX_HP_COL_WIDTH: f32 = 50.0;
+const XP_COL_WIDTH: f32 = 50.0;
+const LVL_COL_WIDTH: f32 = 35.0;
 
 /// Find the frigate the party is currently aboard, if any.
 fn current_ship<'a>(
@@ -22,6 +34,7 @@ fn current_ship<'a>(
 pub fn show(
     ui: &mut egui::Ui,
     party: &mut [Character],
+    locks: &mut PartyLocks,
     frigates: &mut [Frigate],
     map: Option<&MapState>,
     mem: Option<(&dyn MemoryAccess, usize)>,
@@ -33,27 +46,73 @@ pub fn show(
     }
 
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
-        ui.label(egui::RichText::new("⚔").heading());
-        ui.label(
-            egui::RichText::new("Party")
-                .heading()
-                .color(egui::Color32::from_rgb(100, 180, 255)),
+        let gap = ui.spacing().item_spacing.x;
+        // `ui.horizontal` inserts one gap between these cells, so the lead
+        // width only needs the first five table gaps to land the next cell on
+        // the MP column start.
+        let lead_width = NAME_COL_WIDTH
+            + CLASS_COL_WIDTH
+            + STATUS_COL_WIDTH
+            + (STAT_COL_WIDTH * 3.0)
+            + (gap * 5.0);
+
+        ui.allocate_ui_with_layout(
+            egui::vec2(lead_width, ui.spacing().interact_size.y),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.label(egui::RichText::new("⚔").heading());
+                ui.label(
+                    egui::RichText::new("Party")
+                        .heading()
+                        .color(egui::Color32::from_rgb(100, 180, 255)),
+                );
+            },
+        );
+
+        ui.allocate_ui_with_layout(
+            egui::vec2(MP_COL_WIDTH, ui.spacing().interact_size.y),
+            egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+            |ui| {
+                crate::gui::infinity_checkbox(
+                    ui,
+                    &mut locks.mana,
+                    "Lock mana at 99 for the whole party.",
+                );
+            },
+        );
+
+        ui.allocate_ui_with_layout(
+            egui::vec2(HP_COL_WIDTH, ui.spacing().interact_size.y),
+            egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+            |ui| {
+                crate::gui::infinity_checkbox(
+                    ui,
+                    &mut locks.health,
+                    "Lock health at max and force Good status for the whole party.",
+                );
+            },
+        );
+
+        let trailing_width = MAX_HP_COL_WIDTH + XP_COL_WIDTH + LVL_COL_WIDTH + (gap * 2.0);
+        ui.allocate_ui(
+            egui::vec2(trailing_width, ui.spacing().interact_size.y),
+            |_| {},
         );
     });
 
     TableBuilder::new(ui)
-        .column(Column::auto().at_least(70.0)) // Name
-        .column(Column::exact(55.0)) // Class
-        .column(Column::auto().at_least(85.0)) // Status
-        .column(Column::exact(40.0)) // STR
-        .column(Column::exact(40.0)) // DEX
-        .column(Column::exact(40.0)) // INT
-        .column(Column::exact(40.0)) // MP
-        .column(Column::exact(45.0)) // HP
-        .column(Column::exact(50.0)) // MaxHP
-        .column(Column::exact(50.0)) // XP
-        .column(Column::exact(35.0)) // Lvl
+        .column(Column::exact(NAME_COL_WIDTH)) // Name
+        .column(Column::exact(CLASS_COL_WIDTH)) // Class
+        .column(Column::exact(STATUS_COL_WIDTH)) // Status
+        .column(Column::exact(STAT_COL_WIDTH)) // STR
+        .column(Column::exact(STAT_COL_WIDTH)) // DEX
+        .column(Column::exact(STAT_COL_WIDTH)) // INT
+        .column(Column::exact(MP_COL_WIDTH)) // MP
+        .column(Column::exact(HP_COL_WIDTH)) // HP
+        .column(Column::exact(MAX_HP_COL_WIDTH)) // MaxHP
+        .column(Column::exact(XP_COL_WIDTH)) // XP
+        .column(Column::exact(LVL_COL_WIDTH)) // Lvl
         .striped(true)
         .header(20.0, |mut header| {
             let hdr = egui::Color32::from_rgb(140, 180, 255);
@@ -112,15 +171,17 @@ pub fn show(
                 });
 
                 row.col(|ui| {
-                    egui::ComboBox::from_id_salt(format!("status_{i}"))
-                        .selected_text(ch.status.label())
-                        .show_ui(ui, |ui| {
-                            for &s in Status::ALL {
-                                if ui.selectable_value(&mut ch.status, s, s.label()).changed() {
-                                    changed = true;
+                    ui.add_enabled_ui(!locks.health, |ui| {
+                        egui::ComboBox::from_id_salt(format!("status_{i}"))
+                            .selected_text(ch.status.label())
+                            .show_ui(ui, |ui| {
+                                for &s in Status::ALL {
+                                    if ui.selectable_value(&mut ch.status, s, s.label()).changed() {
+                                        changed = true;
+                                    }
                                 }
-                            }
-                        });
+                            });
+                    });
                 });
 
                 row.col(|ui| {
@@ -152,7 +213,10 @@ pub fn show(
 
                 row.col(|ui| {
                     if ui
-                        .add(egui::DragValue::new(&mut ch.mp).range(0..=99))
+                        .add_enabled(
+                            !locks.mana,
+                            egui::DragValue::new(&mut ch.mp).range(0..=MAX_MP),
+                        )
                         .changed()
                     {
                         changed = true;
@@ -161,7 +225,10 @@ pub fn show(
 
                 row.col(|ui| {
                     if ui
-                        .add(egui::DragValue::new(&mut ch.hp).range(0..=999))
+                        .add_enabled(
+                            !locks.health,
+                            egui::DragValue::new(&mut ch.hp).range(0..=999),
+                        )
                         .changed()
                     {
                         changed = true;
@@ -195,10 +262,14 @@ pub fn show(
                     }
                 });
 
+                if mem.is_some() {
+                    changed |= apply_party_locks(&mut ch, locks);
+                }
+
                 if changed {
                     party[i] = ch;
                     if let Some((mem, dos_base)) = mem {
-                        let _ = crate::game::character::write_character(mem, dos_base, &party[i]);
+                        let _ = write_character(mem, dos_base, &party[i]);
                         wrote = true;
                     }
                 }

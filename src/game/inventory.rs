@@ -13,6 +13,32 @@ pub const REAGENT_NAMES: &[&str] = &[
     "Nightshade",
     "Mandrake",
 ];
+pub const MAX_FOOD: u16 = 9999;
+pub const MAX_GOLD: u16 = 9999;
+pub const MAX_CONSUMABLE_COUNT: u8 = 99;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InventoryLocks {
+    pub food: bool,
+    pub gold: bool,
+    pub keys: bool,
+    pub gems: bool,
+    pub torches: bool,
+    pub arrows: bool,
+    pub reagents: [bool; 8],
+}
+
+impl InventoryLocks {
+    pub fn any_active(&self) -> bool {
+        self.food
+            || self.gold
+            || self.keys
+            || self.gems
+            || self.torches
+            || self.arrows
+            || self.reagents.iter().any(|locked| *locked)
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Inventory {
@@ -62,6 +88,49 @@ pub fn write_inventory(mem: &dyn MemoryAccess, dos_base: usize, inv: &Inventory)
     Ok(())
 }
 
+fn lock_u16(value: &mut u16, locked: bool, max: u16) -> bool {
+    if locked && *value != max {
+        *value = max;
+        return true;
+    }
+    false
+}
+
+fn lock_u8(value: &mut u8, locked: bool, max: u8) -> bool {
+    if locked && *value != max {
+        *value = max;
+        return true;
+    }
+    false
+}
+
+pub fn apply_resource_locks(inv: &mut Inventory, locks: &InventoryLocks) -> bool {
+    let mut changed = false;
+
+    changed |= lock_u16(&mut inv.food, locks.food, MAX_FOOD);
+    changed |= lock_u16(&mut inv.gold, locks.gold, MAX_GOLD);
+    changed |= lock_u8(&mut inv.keys, locks.keys, MAX_CONSUMABLE_COUNT);
+    changed |= lock_u8(&mut inv.gems, locks.gems, MAX_CONSUMABLE_COUNT);
+    changed |= lock_u8(&mut inv.torches, locks.torches, MAX_CONSUMABLE_COUNT);
+    changed |= lock_u8(&mut inv.arrows, locks.arrows, MAX_CONSUMABLE_COUNT);
+
+    changed
+}
+
+pub fn apply_reagent_locks(inv: &mut Inventory, locks: &InventoryLocks) -> bool {
+    let mut changed = false;
+
+    for (value, locked) in inv.reagents.iter_mut().zip(locks.reagents.iter()) {
+        changed |= lock_u8(value, *locked, MAX_CONSUMABLE_COUNT);
+    }
+
+    changed
+}
+
+pub fn apply_inventory_locks(inv: &mut Inventory, locks: &InventoryLocks) -> bool {
+    apply_resource_locks(inv, locks) | apply_reagent_locks(inv, locks)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,13 +169,13 @@ mod tests {
     fn write_then_read_roundtrip() {
         let mem = MockMemory::new(SAVE_BASE + 0x300);
         let inv = Inventory {
-            food: 9999,
-            gold: 9999,
-            keys: 99,
-            gems: 99,
-            torches: 99,
-            arrows: 99,
-            reagents: [99; 8],
+            food: MAX_FOOD,
+            gold: MAX_GOLD,
+            keys: MAX_CONSUMABLE_COUNT,
+            gems: MAX_CONSUMABLE_COUNT,
+            torches: MAX_CONSUMABLE_COUNT,
+            arrows: MAX_CONSUMABLE_COUNT,
+            reagents: [MAX_CONSUMABLE_COUNT; 8],
             karma: 99,
         };
         write_inventory(&mem, 0, &inv).unwrap();
@@ -153,5 +222,73 @@ mod tests {
         assert_eq!(readback.arrows, original.arrows);
         assert_eq!(readback.reagents, original.reagents);
         assert_eq!(readback.karma, original.karma);
+    }
+
+    #[test]
+    fn inventory_locks_only_touch_enabled_fields() {
+        let mut inv = Inventory {
+            food: 100,
+            gold: 200,
+            keys: 3,
+            gems: 4,
+            torches: 5,
+            arrows: 6,
+            reagents: [1, 2, 3, 4, 5, 6, 7, 8],
+            karma: 50,
+        };
+        let locks = InventoryLocks {
+            food: true,
+            arrows: true,
+            reagents: [false, true, false, false, false, false, false, true],
+            ..InventoryLocks::default()
+        };
+
+        assert!(apply_inventory_locks(&mut inv, &locks));
+        assert_eq!(inv.food, MAX_FOOD);
+        assert_eq!(inv.arrows, MAX_CONSUMABLE_COUNT);
+        assert_eq!(inv.reagents[1], MAX_CONSUMABLE_COUNT);
+        assert_eq!(inv.reagents[7], MAX_CONSUMABLE_COUNT);
+        assert_eq!(inv.gold, 200);
+        assert_eq!(inv.reagents[0], 1);
+    }
+
+    #[test]
+    fn resource_locks_do_not_modify_reagents() {
+        let mut inv = Inventory {
+            food: 100,
+            reagents: [1, 2, 3, 4, 5, 6, 7, 8],
+            ..Inventory::default()
+        };
+        let locks = InventoryLocks {
+            food: true,
+            reagents: [true; 8],
+            ..InventoryLocks::default()
+        };
+
+        assert!(apply_resource_locks(&mut inv, &locks));
+        assert_eq!(inv.food, MAX_FOOD);
+        assert_eq!(inv.reagents, [1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn reagent_locks_do_not_modify_resources() {
+        let mut inv = Inventory {
+            food: 100,
+            arrows: 6,
+            reagents: [1, 2, 3, 4, 5, 6, 7, 8],
+            ..Inventory::default()
+        };
+        let locks = InventoryLocks {
+            food: true,
+            arrows: true,
+            reagents: [false, true, false, false, false, false, false, true],
+            ..InventoryLocks::default()
+        };
+
+        assert!(apply_reagent_locks(&mut inv, &locks));
+        assert_eq!(inv.food, 100);
+        assert_eq!(inv.arrows, 6);
+        assert_eq!(inv.reagents[1], MAX_CONSUMABLE_COUNT);
+        assert_eq!(inv.reagents[7], MAX_CONSUMABLE_COUNT);
     }
 }

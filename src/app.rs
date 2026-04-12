@@ -3,9 +3,13 @@ use std::time::{Duration, Instant};
 
 use crate::audio::AudioSession;
 use crate::dosbox::config;
-use crate::game::character::{Character, read_party};
+use crate::game::character::{
+    Character, PartyLocks, apply_party_locks, read_party, write_character,
+};
 use crate::game::injection::{self, PatchState};
-use crate::game::inventory::{Inventory, read_inventory};
+use crate::game::inventory::{
+    Inventory, InventoryLocks, apply_inventory_locks, read_inventory, write_inventory,
+};
 use crate::game::map;
 use crate::game::quest::{ShrineQuest, read_shrine_quest};
 use crate::game::vehicle::{self, Frigate};
@@ -29,6 +33,8 @@ const PROCESS_SCAN_INTERVAL: Duration = Duration::from_secs(2);
 
 /// How often to rescan memory when attached but game not yet confirmed.
 const RESCAN_INTERVAL: Duration = Duration::from_secs(2);
+/// Keep lock-only polling responsive without forcing full-speed auto-refresh.
+const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 pub struct UltimaCompanion {
     // Connection state
@@ -56,6 +62,8 @@ pub struct UltimaCompanion {
 
     // UI state
     auto_refresh: bool,
+    party_locks: PartyLocks,
+    inventory_locks: InventoryLocks,
     refresh_interval_secs: f32,
     last_refresh: Instant,
     status_msg: String,
@@ -91,6 +99,8 @@ impl UltimaCompanion {
             last_rescan: Instant::now(),
             suppress_auto_attach: false,
             auto_refresh: true,
+            party_locks: PartyLocks::default(),
+            inventory_locks: InventoryLocks::default(),
             refresh_interval_secs: 0.025,
             last_refresh: Instant::now(),
             status_msg: "Searching for DOSBox...".to_string(),
@@ -323,6 +333,7 @@ impl UltimaCompanion {
 
         let pid = attached.process.pid;
         let mem: &dyn MemoryAccess = &attached.process.memory;
+        let mut game_written = false;
 
         match read_party(mem, dos_base) {
             Ok(p) => self.party = p,
@@ -332,12 +343,32 @@ impl UltimaCompanion {
             }
         }
 
+        if self.party_locks.any_active() {
+            for ch in &mut self.party {
+                if apply_party_locks(ch, &self.party_locks) {
+                    if let Err(e) = write_character(mem, dos_base, ch) {
+                        self.status_msg = format!("Write character failed: {e}");
+                        return;
+                    }
+                    game_written = true;
+                }
+            }
+        }
+
         match read_inventory(mem, dos_base) {
             Ok(inv) => self.inventory = inv,
             Err(e) => {
                 self.status_msg = format!("Read inventory failed: {e}");
                 return;
             }
+        }
+
+        if apply_inventory_locks(&mut self.inventory, &self.inventory_locks) {
+            if let Err(e) = write_inventory(mem, dos_base, &self.inventory) {
+                self.status_msg = format!("Write inventory failed: {e}");
+                return;
+            }
+            game_written = true;
         }
 
         match read_shrine_quest(mem, dos_base) {
@@ -364,11 +395,19 @@ impl UltimaCompanion {
             }
         }
 
+        if game_written && let Some(ref patch) = self.patch_state {
+            let _ = injection::trigger_redraw(mem, patch);
+        }
+
         // Lazy audio session acquisition: DOSBox may not have an audio
         // session until it starts producing sound.
         self.try_acquire_audio(pid);
 
         self.last_refresh = Instant::now();
+    }
+
+    fn has_active_locks(&self) -> bool {
+        self.party_locks.any_active() || self.inventory_locks.any_active()
     }
 }
 
@@ -402,8 +441,12 @@ impl eframe::App for UltimaCompanion {
                     }
                 }
                 ctx.request_repaint_after(RESCAN_INTERVAL);
-            } else if self.auto_refresh {
-                let interval = Duration::from_secs_f32(self.refresh_interval_secs);
+            } else if self.auto_refresh || self.has_active_locks() {
+                let interval = if self.auto_refresh {
+                    Duration::from_secs_f32(self.refresh_interval_secs)
+                } else {
+                    LOCK_POLL_INTERVAL
+                };
                 if self.last_refresh.elapsed() >= interval {
                     self.refresh_game_state();
                 }
@@ -464,6 +507,8 @@ impl eframe::App for UltimaCompanion {
             attached,
             party,
             inventory,
+            party_locks,
+            inventory_locks,
             shrine_quest,
             frigates,
             minimap,
@@ -495,8 +540,14 @@ impl eframe::App for UltimaCompanion {
         egui::Panel::top("dashboard").show_inside(ui, |ui| {
             gui::section_frame(ui).show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                game_written |=
-                    gui::party_panel::show(ui, party, frigates, minimap.map.as_ref(), mem);
+                game_written |= gui::party_panel::show(
+                    ui,
+                    party,
+                    party_locks,
+                    frigates,
+                    minimap.map.as_ref(),
+                    mem,
+                );
             });
 
             ui.add_space(4.0);
@@ -504,11 +555,13 @@ impl eframe::App for UltimaCompanion {
             ui.columns(4, |cols| {
                 gui::section_frame(&cols[0]).show(&mut cols[0], |ui| {
                     ui.set_min_width(ui.available_width());
-                    game_written |= gui::inventory_panel::show_resources(ui, inventory, mem);
+                    game_written |=
+                        gui::inventory_panel::show_resources(ui, inventory, inventory_locks, mem);
                 });
                 gui::section_frame(&cols[1]).show(&mut cols[1], |ui| {
                     ui.set_min_width(ui.available_width());
-                    game_written |= gui::inventory_panel::show_reagents(ui, inventory, mem);
+                    game_written |=
+                        gui::inventory_panel::show_reagents(ui, inventory, inventory_locks, mem);
                 });
                 gui::section_frame(&cols[2]).show(&mut cols[2], |ui| {
                     ui.set_min_width(ui.available_width());
@@ -576,6 +629,8 @@ mod tests {
             last_rescan: Instant::now(),
             suppress_auto_attach: false,
             auto_refresh: true,
+            party_locks: PartyLocks::default(),
+            inventory_locks: InventoryLocks::default(),
             refresh_interval_secs: 0.025,
             last_refresh: Instant::now(),
             status_msg: "Connected".to_string(),

@@ -117,6 +117,20 @@ impl From<Status> for u8 {
     }
 }
 
+pub const MAX_MP: u8 = 99;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PartyLocks {
+    pub mana: bool,
+    pub health: bool,
+}
+
+impl PartyLocks {
+    pub fn any_active(&self) -> bool {
+        self.mana || self.health
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Character {
     pub index: usize,
@@ -133,6 +147,28 @@ pub struct Character {
     pub xp: u16,
     pub level: u8,
     pub equipment: [u8; 6],
+}
+
+pub fn apply_party_locks(ch: &mut Character, locks: &PartyLocks) -> bool {
+    let mut changed = false;
+
+    if locks.mana && ch.mp != MAX_MP {
+        ch.mp = MAX_MP;
+        changed = true;
+    }
+
+    if locks.health {
+        if ch.hp != ch.max_hp {
+            ch.hp = ch.max_hp;
+            changed = true;
+        }
+        if ch.status != Status::Good {
+            ch.status = Status::Good;
+            changed = true;
+        }
+    }
+
+    changed
 }
 
 pub fn read_character(mem: &dyn MemoryAccess, dos_base: usize, index: usize) -> Result<Character> {
@@ -348,5 +384,64 @@ mod tests {
         mem.set_bytes(char_addr(0, 0, CHAR_NAME), b"Abcdefgh\0");
         let ch = read_character(&mem, 0, 0).unwrap();
         assert_eq!(ch.name, "Abcdefgh");
+    }
+
+    #[test]
+    fn health_lock_restores_good_status_and_max_hp() {
+        let mut ch = Character {
+            index: 0,
+            name: "Iolo".to_string(),
+            gender: Gender::Male,
+            class: CharClass::Bard,
+            status: Status::Asleep,
+            str_: 20,
+            dex: 20,
+            int: 20,
+            mp: 12,
+            hp: 45,
+            max_hp: 90,
+            xp: 1000,
+            level: 4,
+            equipment: [0; 6],
+        };
+
+        assert!(apply_party_locks(
+            &mut ch,
+            &PartyLocks {
+                health: true,
+                mana: false,
+            }
+        ));
+        assert_eq!(ch.status, Status::Good);
+        assert_eq!(ch.hp, ch.max_hp);
+    }
+
+    #[test]
+    fn mana_lock_sets_mp_to_max() {
+        let mut ch = Character {
+            index: 0,
+            name: "Mariah".to_string(),
+            gender: Gender::Female,
+            class: CharClass::Mage,
+            status: Status::Good,
+            str_: 20,
+            dex: 20,
+            int: 20,
+            mp: 18,
+            hp: 55,
+            max_hp: 55,
+            xp: 1000,
+            level: 4,
+            equipment: [0; 6],
+        };
+
+        assert!(apply_party_locks(
+            &mut ch,
+            &PartyLocks {
+                health: false,
+                mana: true,
+            }
+        ));
+        assert_eq!(ch.mp, MAX_MP);
     }
 }

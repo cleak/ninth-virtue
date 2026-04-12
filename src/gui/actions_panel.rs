@@ -1,5 +1,5 @@
 use crate::game::character::{Character, Status, write_character};
-use crate::game::inventory::{Inventory, write_inventory};
+use crate::game::inventory::{Inventory, MAX_CONSUMABLE_COUNT, write_inventory};
 use crate::game::offsets::FRIGATE_MAX_HULL;
 use crate::game::vehicle::{Frigate, write_frigate_hull};
 use crate::memory::access::MemoryAccess;
@@ -142,7 +142,7 @@ pub fn show(
         )
         .clicked()
     {
-        inventory.arrows = 99;
+        inventory.arrows = MAX_CONSUMABLE_COUNT;
         if let Some((mem, base)) = mem {
             let _ = write_inventory(mem, base, inventory);
             wrote = true;
