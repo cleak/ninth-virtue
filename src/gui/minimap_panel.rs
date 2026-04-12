@@ -74,6 +74,50 @@ struct LowpassTileSample {
     coverage: u8,
 }
 
+/// Premultiplied overview sample used while collapsing multiple map layers
+/// into one low-pass texel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PremultipliedCoverageSample {
+    rgb: [u32; 3],
+    coverage: u32,
+}
+
+impl PremultipliedCoverageSample {
+    fn from_lowpass_tile(sample: LowpassTileSample) -> Self {
+        let coverage = sample.coverage as u32;
+        Self {
+            rgb: [
+                (sample.rgb[0] as u32 * coverage + 127) / 255,
+                (sample.rgb[1] as u32 * coverage + 127) / 255,
+                (sample.rgb[2] as u32 * coverage + 127) / 255,
+            ],
+            coverage,
+        }
+    }
+
+    fn composite_over(self, overlay: LowpassTileSample) -> Self {
+        let overlay = Self::from_lowpass_tile(overlay);
+        let inverse_overlay = 255 - overlay.coverage;
+        Self {
+            rgb: [
+                (self.rgb[0] * inverse_overlay + 127) / 255 + overlay.rgb[0],
+                (self.rgb[1] * inverse_overlay + 127) / 255 + overlay.rgb[1],
+                (self.rgb[2] * inverse_overlay + 127) / 255 + overlay.rgb[2],
+            ],
+            coverage: (self.coverage * inverse_overlay + 127) / 255 + overlay.coverage,
+        }
+    }
+
+    fn to_rgba(self) -> [u8; 4] {
+        [
+            self.rgb[0].min(255) as u8,
+            self.rgb[1].min(255) as u8,
+            self.rgb[2].min(255) as u8,
+            self.coverage.min(255) as u8,
+        ]
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct LabelFilters {
     towns: bool,
@@ -1274,37 +1318,16 @@ fn build_lowpass_map(
 
     let mut lowpass = vec![0u8; texels * 4];
     for idx in 0..texels {
-        let terrain = tile_lut[grid_data[idx] as usize];
-        let mut coverage = terrain.coverage as u32;
-        let mut premult_rgb = [
-            (terrain.rgb[0] as u32 * coverage + 127) / 255,
-            (terrain.rgb[1] as u32 * coverage + 127) / 255,
-            (terrain.rgb[2] as u32 * coverage + 127) / 255,
-        ];
+        let mut sample =
+            PremultipliedCoverageSample::from_lowpass_tile(tile_lut[grid_data[idx] as usize]);
 
         let object_id = objects_data[idx];
         if object_id != 0 {
-            let overlay = tile_lut[object_id as usize + 256];
-            let overlay_coverage = overlay.coverage as u32;
-            let overlay_premult = [
-                (overlay.rgb[0] as u32 * overlay_coverage + 127) / 255,
-                (overlay.rgb[1] as u32 * overlay_coverage + 127) / 255,
-                (overlay.rgb[2] as u32 * overlay_coverage + 127) / 255,
-            ];
-            premult_rgb[0] =
-                (premult_rgb[0] * (255 - overlay_coverage) + 127) / 255 + overlay_premult[0];
-            premult_rgb[1] =
-                (premult_rgb[1] * (255 - overlay_coverage) + 127) / 255 + overlay_premult[1];
-            premult_rgb[2] =
-                (premult_rgb[2] * (255 - overlay_coverage) + 127) / 255 + overlay_premult[2];
-            coverage = (coverage * (255 - overlay_coverage) + 127) / 255 + overlay_coverage;
+            sample = sample.composite_over(tile_lut[object_id as usize + 256]);
         }
 
         let out = &mut lowpass[idx * 4..idx * 4 + 4];
-        out[0] = premult_rgb[0].min(255) as u8;
-        out[1] = premult_rgb[1].min(255) as u8;
-        out[2] = premult_rgb[2].min(255) as u8;
-        out[3] = coverage.min(255) as u8;
+        out.copy_from_slice(&sample.to_rgba());
     }
 
     lowpass
@@ -1939,6 +1962,28 @@ mod tests {
 
         let lowpass = build_lowpass_map(&[7], &[0], &lut, 1, 1);
         assert_eq!(lowpass, vec![40, 60, 100, 128]);
+    }
+
+    #[test]
+    fn lowpass_map_composites_partial_overlay_over_partial_terrain() {
+        let mut lut = vec![
+            LowpassTileSample {
+                rgb: [0, 0, 0],
+                coverage: 255,
+            };
+            TILE_COUNT
+        ];
+        lut[7] = LowpassTileSample {
+            rgb: [80, 120, 200],
+            coverage: 128,
+        };
+        lut[256 + 3] = LowpassTileSample {
+            rgb: [200, 80, 40],
+            coverage: 64,
+        };
+
+        let lowpass = build_lowpass_map(&[7], &[3], &lut, 1, 1);
+        assert_eq!(lowpass, vec![80, 65, 85, 160]);
     }
 
     #[test]
