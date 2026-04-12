@@ -21,6 +21,7 @@ use crate::memory::access::MemoryAccess;
 use crate::memory::process::{self, DosBoxProcess};
 use crate::memory::scanner;
 use crate::tiles::atlas::TileAtlas;
+use windows::Win32::Foundation::HANDLE;
 
 pub struct AttachedProcess {
     pub process: DosBoxProcess,
@@ -220,9 +221,36 @@ impl UltimaCompanion {
             self.status_msg = "Waiting for game to load...".to_string();
         }
 
-        // Try to locate game data files and load tile atlas + world map.
+        self.load_game_assets_for_handle(proc.memory.handle());
+
+        self.selected_pid = Some(pid);
+        self.try_acquire_audio(pid);
+        self.attached = Some(AttachedProcess {
+            process: proc,
+            dos_base,
+            game_confirmed,
+        });
+        self.last_rescan = Instant::now();
+
+        if game_confirmed {
+            self.sync_confirmed_game_state();
+        }
+    }
+
+    /// Return whether the current attachment should retry DOSBox config and
+    /// asset discovery once the game becomes confirmed in place.
+    fn needs_game_asset_retry(&self) -> bool {
+        self.game_dir.is_none()
+            || self.tile_atlas.is_none()
+            || self.world_map.is_none()
+            || self.tile_atlas_error.is_some()
+    }
+
+    /// Load the Ultima V asset directory, tile atlas, and world map for a
+    /// DOSBox-family process handle.
+    fn load_game_assets_for_handle(&mut self, handle: HANDLE) {
         self.tile_atlas_error = None;
-        match config::find_game_directory(proc.memory.handle()) {
+        match config::find_game_directory(handle) {
             Ok(dir) => {
                 match TileAtlas::load(&dir) {
                     Ok(atlas) => {
@@ -251,19 +279,19 @@ impl UltimaCompanion {
                 self.tile_atlas_error = Some(game_dir_error);
             }
         }
+    }
 
-        self.selected_pid = Some(pid);
-        self.try_acquire_audio(pid);
-        self.attached = Some(AttachedProcess {
-            process: proc,
-            dos_base,
-            game_confirmed,
-        });
-        self.last_rescan = Instant::now();
-
-        if game_confirmed {
-            self.sync_confirmed_game_state();
-        }
+    /// Retry asset discovery for the current attachment after an in-place
+    /// transition from unconfirmed to confirmed game state.
+    fn retry_game_assets_for_attached_process(&mut self) {
+        let Some(handle) = self
+            .attached
+            .as_ref()
+            .map(|attached| attached.process.memory.handle())
+        else {
+            return;
+        };
+        self.load_game_assets_for_handle(handle);
     }
 
     fn detach(&mut self) {
@@ -582,6 +610,9 @@ impl eframe::App for UltimaCompanion {
                 if self.last_rescan.elapsed() >= RESCAN_INTERVAL {
                     self.rescan_memory();
                     if self.attached.as_ref().is_some_and(|a| a.game_confirmed) {
+                        if self.needs_game_asset_retry() {
+                            self.retry_game_assets_for_attached_process();
+                        }
                         self.sync_confirmed_game_state();
                     } else {
                         self.try_promote_to_confirmed_process();
