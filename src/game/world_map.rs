@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::game::map::LocationType;
+use crate::game::map::{LocationType, is_underworld_z};
 use crate::game::quest::Virtue;
 
 /// Offset in DATA.OVL where the 256-byte chunk flag table starts.
@@ -16,6 +16,8 @@ const DATA_OVL_SHRINE_Y: usize = 0x1F86;
 
 /// Tile ID used for water-only chunks.
 const WATER_TILE: u8 = 0x01;
+const OUTDOOR_MAP_LEN: usize = 256 * 256;
+const OUTDOOR_CHUNK_LEN: usize = 16 * 16;
 
 /// Filter categories exposed by the overworld minimap label controls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,14 +76,15 @@ impl WorldLocation {
     }
 }
 
-/// The full 256x256 overworld tile grid, loaded from BRIT.DAT.
+/// The full 256x256 outdoor tile grids, loaded from BRIT.DAT and UNDER.DAT.
 pub struct WorldMap {
-    tiles: Box<[u8; 256 * 256]>,
+    britannia_tiles: Box<[u8; OUTDOOR_MAP_LEN]>,
+    underworld_tiles: Box<[u8; OUTDOOR_MAP_LEN]>,
     locations: Vec<WorldLocation>,
 }
 
 impl WorldMap {
-    /// Load the overworld from BRIT.DAT and DATA.OVL in the game directory.
+    /// Load the outdoor worlds from BRIT.DAT, UNDER.DAT, and DATA.OVL.
     pub fn load(game_dir: &Path) -> Result<Self> {
         let ovl_path = find_file(game_dir, "data.ovl")?;
         let ovl = std::fs::read(&ovl_path)
@@ -100,64 +103,107 @@ impl WorldMap {
         let brit_path = find_file(game_dir, "brit.dat")?;
         let brit = std::fs::read(&brit_path)
             .with_context(|| format!("failed to read {}", brit_path.display()))?;
+        let under_path = find_file(game_dir, "under.dat")?;
+        let under = std::fs::read(&under_path)
+            .with_context(|| format!("failed to read {}", under_path.display()))?;
 
-        let mut map = Self::from_raw(chunk_flags, &brit)?;
+        let mut map = Self::from_raw(chunk_flags, &brit, &under)?;
         map.locations = locations;
         map.locations.extend(shrines);
         Ok(map)
     }
 
-    /// Build a WorldMap from raw chunk flags and BRIT.DAT data.
+    /// Build a WorldMap from raw Britannia chunk flags, BRIT.DAT data, and
+    /// UNDER.DAT data.
     ///
     /// Each of the 256 chunk flag bytes is either 0xFF (water-only chunk,
     /// filled with tile 0x01) or the chunk's sequential index into `brit_data`.
     /// Each chunk is 256 bytes (16x16 tiles, row-major).
-    fn from_raw(chunk_flags: &[u8; 256], brit_data: &[u8]) -> Result<Self> {
-        let mut tiles = Box::new([0u8; 256 * 256]);
-
-        for (chunk_idx, &flag) in chunk_flags.iter().enumerate() {
-            let chunk_x = chunk_idx % 16;
-            let chunk_y = chunk_idx / 16;
-
-            if flag == 0xFF {
-                for ly in 0..16 {
-                    for lx in 0..16 {
-                        tiles[(chunk_y * 16 + ly) * 256 + chunk_x * 16 + lx] = WATER_TILE;
-                    }
-                }
-            } else {
-                let file_offset = flag as usize * 256;
-                anyhow::ensure!(
-                    file_offset + 256 <= brit_data.len(),
-                    "BRIT.DAT too small: chunk {} wants offset {}, file is {} bytes",
-                    chunk_idx,
-                    file_offset + 256,
-                    brit_data.len()
-                );
-                let chunk_data = &brit_data[file_offset..file_offset + 256];
-                for ly in 0..16 {
-                    for lx in 0..16 {
-                        tiles[(chunk_y * 16 + ly) * 256 + chunk_x * 16 + lx] =
-                            chunk_data[ly * 16 + lx];
-                    }
-                }
-            }
-        }
+    fn from_raw(chunk_flags: &[u8; 256], brit_data: &[u8], under_data: &[u8]) -> Result<Self> {
+        let britannia_tiles = decode_britannia_tiles(chunk_flags, brit_data)?;
+        let underworld_tiles = decode_underworld_tiles(under_data)?;
 
         Ok(Self {
-            tiles,
+            britannia_tiles,
+            underworld_tiles,
             locations: Vec::new(),
         })
     }
 
-    /// Get the tile ID at world coordinates (x, y). Always valid for u8 inputs.
-    pub fn get_tile(&self, x: u8, y: u8) -> u8 {
-        self.tiles[y as usize * 256 + x as usize]
+    /// Get the tile ID at outdoor world coordinates (x, y).
+    pub fn outdoor_tile(&self, z: u8, x: u8, y: u8) -> u8 {
+        let tiles = if is_underworld_z(z) {
+            &self.underworld_tiles
+        } else {
+            &self.britannia_tiles
+        };
+        tiles[y as usize * 256 + x as usize]
     }
 
     /// Return all parsed overworld label points from DATA.OVL.
     pub fn locations(&self) -> &[WorldLocation] {
         &self.locations
+    }
+}
+
+fn decode_britannia_tiles(
+    chunk_flags: &[u8; 256],
+    brit_data: &[u8],
+) -> Result<Box<[u8; OUTDOOR_MAP_LEN]>> {
+    let mut tiles = Box::new([0u8; OUTDOOR_MAP_LEN]);
+
+    for (chunk_idx, &flag) in chunk_flags.iter().enumerate() {
+        if flag == 0xFF {
+            blit_outdoor_chunk(&mut tiles, chunk_idx, &[WATER_TILE; OUTDOOR_CHUNK_LEN]);
+            continue;
+        }
+
+        let file_offset = flag as usize * OUTDOOR_CHUNK_LEN;
+        anyhow::ensure!(
+            file_offset + OUTDOOR_CHUNK_LEN <= brit_data.len(),
+            "BRIT.DAT too small: chunk {} wants offset {}, file is {} bytes",
+            chunk_idx,
+            file_offset + OUTDOOR_CHUNK_LEN,
+            brit_data.len()
+        );
+        blit_outdoor_chunk(
+            &mut tiles,
+            chunk_idx,
+            &brit_data[file_offset..file_offset + OUTDOOR_CHUNK_LEN],
+        );
+    }
+
+    Ok(tiles)
+}
+
+fn decode_underworld_tiles(under_data: &[u8]) -> Result<Box<[u8; OUTDOOR_MAP_LEN]>> {
+    anyhow::ensure!(
+        under_data.len() >= OUTDOOR_MAP_LEN,
+        "UNDER.DAT too small: needs at least {} bytes, file is {} bytes",
+        OUTDOOR_MAP_LEN,
+        under_data.len()
+    );
+
+    let mut tiles = Box::new([0u8; OUTDOOR_MAP_LEN]);
+    for (chunk_idx, chunk_data) in under_data[..OUTDOOR_MAP_LEN]
+        .chunks_exact(OUTDOOR_CHUNK_LEN)
+        .enumerate()
+    {
+        blit_outdoor_chunk(&mut tiles, chunk_idx, chunk_data);
+    }
+
+    Ok(tiles)
+}
+
+fn blit_outdoor_chunk(tiles: &mut [u8; OUTDOOR_MAP_LEN], chunk_idx: usize, chunk_data: &[u8]) {
+    let chunk_x = chunk_idx % 16;
+    let chunk_y = chunk_idx / 16;
+
+    debug_assert_eq!(chunk_data.len(), OUTDOOR_CHUNK_LEN);
+    for ly in 0..16 {
+        for lx in 0..16 {
+            tiles[(chunk_y * 16 + ly) * 256 + chunk_x * 16 + lx] = chunk_data[ly * 16 + lx];
+        }
     }
 }
 
@@ -240,10 +286,10 @@ mod tests {
     #[test]
     fn all_water_chunks() {
         let chunk_flags = [0xFFu8; 256];
-        let map = WorldMap::from_raw(&chunk_flags, &[]).unwrap();
+        let map = WorldMap::from_raw(&chunk_flags, &[], &[0; OUTDOOR_MAP_LEN]).unwrap();
         for y in 0..=255u8 {
             for x in 0..=255u8 {
-                assert_eq!(map.get_tile(x, y), 0x01);
+                assert_eq!(map.outdoor_tile(0, x, y), 0x01);
             }
         }
     }
@@ -254,10 +300,10 @@ mod tests {
         chunk_flags[0] = 0x00;
         let brit_data = vec![0x05u8; 256]; // grass
 
-        let map = WorldMap::from_raw(&chunk_flags, &brit_data).unwrap();
-        assert_eq!(map.get_tile(0, 0), 0x05);
-        assert_eq!(map.get_tile(15, 15), 0x05);
-        assert_eq!(map.get_tile(16, 0), 0x01); // adjacent chunk is water
+        let map = WorldMap::from_raw(&chunk_flags, &brit_data, &[0; OUTDOOR_MAP_LEN]).unwrap();
+        assert_eq!(map.outdoor_tile(0, 0, 0), 0x05);
+        assert_eq!(map.outdoor_tile(0, 15, 15), 0x05);
+        assert_eq!(map.outdoor_tile(0, 16, 0), 0x01); // adjacent chunk is water
     }
 
     #[test]
@@ -269,10 +315,25 @@ mod tests {
         let mut brit_data = vec![0x05u8; 256]; // chunk 0: grass
         brit_data.extend(vec![0x07u8; 256]); // chunk 1: desert
 
-        let map = WorldMap::from_raw(&chunk_flags, &brit_data).unwrap();
-        assert_eq!(map.get_tile(0, 0), 0x05); // chunk 0
-        assert_eq!(map.get_tile(16, 0), 0x07); // chunk 1
-        assert_eq!(map.get_tile(0, 16), 0x01); // chunk 16: water
+        let map = WorldMap::from_raw(&chunk_flags, &brit_data, &[0; OUTDOOR_MAP_LEN]).unwrap();
+        assert_eq!(map.outdoor_tile(0, 0, 0), 0x05); // chunk 0
+        assert_eq!(map.outdoor_tile(0, 16, 0), 0x07); // chunk 1
+        assert_eq!(map.outdoor_tile(0, 0, 16), 0x01); // chunk 16: water
+    }
+
+    #[test]
+    fn underworld_tiles_use_canonical_chunk_order() {
+        let chunk_flags = [0xFFu8; 256];
+        let mut under_data = vec![0u8; OUTDOOR_MAP_LEN];
+        under_data[..OUTDOOR_CHUNK_LEN].fill(0x12);
+        under_data[OUTDOOR_CHUNK_LEN..OUTDOOR_CHUNK_LEN * 2].fill(0x34);
+        under_data[OUTDOOR_CHUNK_LEN * 16..OUTDOOR_CHUNK_LEN * 17].fill(0x56);
+
+        let map = WorldMap::from_raw(&chunk_flags, &[], &under_data).unwrap();
+        assert_eq!(map.outdoor_tile(0xFF, 0, 0), 0x12);
+        assert_eq!(map.outdoor_tile(0xFF, 15, 15), 0x12);
+        assert_eq!(map.outdoor_tile(0xFF, 16, 0), 0x34);
+        assert_eq!(map.outdoor_tile(0xFF, 0, 16), 0x56);
     }
 
     #[test]
