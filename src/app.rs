@@ -249,6 +249,9 @@ impl UltimaCompanion {
     /// Load the Ultima V asset directory, tile atlas, and world map for a
     /// DOSBox-family process handle.
     fn load_game_assets_for_handle(&mut self, handle: HANDLE) {
+        self.game_dir = None;
+        self.tile_atlas = None;
+        self.world_map = None;
         self.tile_atlas_error = None;
         match config::find_game_directory(handle) {
             Ok(dir) => {
@@ -413,13 +416,21 @@ impl UltimaCompanion {
             return;
         };
 
-        if current_pid != Some(pid)
-            || self
-                .attached
-                .as_ref()
-                .is_some_and(|attached| !attached.game_confirmed)
-        {
+        if current_pid != Some(pid) {
             self.attach(pid);
+            return;
+        }
+
+        if let Some(attached) = self
+            .attached
+            .as_mut()
+            .filter(|attached| !attached.game_confirmed)
+        {
+            attached.game_confirmed = true;
+            if self.needs_game_asset_retry() {
+                self.retry_game_assets_for_attached_process();
+            }
+            self.sync_confirmed_game_state();
         }
     }
 
