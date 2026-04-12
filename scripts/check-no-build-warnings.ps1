@@ -10,7 +10,7 @@ try {
         $env:RUSTFLAGS = "$previousRustFlags -Dwarnings"
     }
 
-    $output = & cargo build --locked --all-targets --quiet 2>&1 | ForEach-Object {
+    $output = & cargo build --locked --all-targets --quiet --color never 2>&1 | ForEach-Object {
         $_.ToString()
     }
     $exitCode = $LASTEXITCODE
