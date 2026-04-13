@@ -21,6 +21,7 @@ use crate::memory::access::MemoryAccess;
 use crate::memory::process::{self, DosBoxProcess};
 use crate::memory::scanner;
 use crate::tiles::atlas::TileAtlas;
+use windows::Win32::Foundation::HANDLE;
 
 pub struct AttachedProcess {
     pub process: DosBoxProcess,
@@ -113,13 +114,55 @@ impl UltimaCompanion {
         app.minimap.load_persistent_preferences();
         // Scan immediately on startup so we connect without delay.
         app.scan_processes();
-        if app.process_list.len() == 1 {
-            let pid = app.process_list[0].0;
-            app.attach(pid);
-        }
+        app.auto_attach_preferred_process();
         app
     }
 
+    /// Auto-attach when there is a single candidate or exactly one confirmed
+    /// Ultima V session among multiple DOSBox-family processes.
+    fn auto_attach_preferred_process(&mut self) {
+        if self.suppress_auto_attach || self.attached.is_some() {
+            return;
+        }
+
+        let pid = if self.process_list.len() == 1 {
+            self.process_list[0].0
+        } else {
+            let Some(pid) = self.unique_confirmed_process_pid() else {
+                return;
+            };
+            pid
+        };
+
+        self.attach(pid);
+    }
+
+    /// Return the sole confirmed Ultima V process, or `None` when zero or
+    /// multiple DOSBox-family processes validate as live game sessions.
+    fn unique_confirmed_process_pid(&self) -> Option<u32> {
+        let mut confirmed_pid = None;
+
+        for (pid, _) in &self.process_list {
+            let Ok(proc) = process::attach(*pid) else {
+                continue;
+            };
+            let Ok(result) = scanner::find_dos_base(&proc.memory) else {
+                continue;
+            };
+            if !result.game_confirmed {
+                continue;
+            }
+            if confirmed_pid.is_some() {
+                return None;
+            }
+            confirmed_pid = Some(*pid);
+        }
+
+        confirmed_pid
+    }
+
+    /// Refresh the visible DOSBox-family process list and keep the current
+    /// selection stable when the selected PID still exists.
     fn scan_processes(&mut self) {
         match process::list_dosbox_processes() {
             Ok(list) => {
@@ -142,78 +185,116 @@ impl UltimaCompanion {
         self.last_process_scan = Instant::now();
     }
 
+    /// Clear the current attachment state so a confirmed replacement can take over.
+    fn prepare_for_attach(&mut self) {
+        if let (Some(attached), Some(state)) = (&self.attached, &self.patch_state) {
+            injection::remove_patch(&attached.process.memory, state);
+        }
+        self.patch_state = None;
+        self.clear_attached_state("Connecting...");
+    }
+
     fn attach(&mut self, pid: u32) {
-        match process::attach(pid) {
-            Ok(proc) => {
-                let (dos_base, game_confirmed) = match scanner::find_dos_base(&proc.memory) {
-                    Ok(result) => (Some(result.dos_base), result.game_confirmed),
-                    Err(e) => {
-                        self.status_msg = format!("Attached, scan failed: {e}");
-                        (None, false)
-                    }
-                };
-
-                if dos_base.is_some() {
-                    if game_confirmed {
-                        self.status_msg = format!("Connected to {} (PID {})", proc.name, proc.pid,);
-                    } else {
-                        self.status_msg = "Waiting for game to load...".to_string();
-                    }
+        let had_attachment = self.attached.is_some();
+        let (proc, scan_result) = match process::attach(pid)
+            .and_then(|proc| scanner::find_dos_base(&proc.memory).map(|scan| (proc, scan)))
+        {
+            Ok(result) => result,
+            Err(e) => {
+                if had_attachment {
+                    self.status_msg =
+                        format!("Retained current session; attach to PID {pid} failed: {e}");
+                } else {
+                    self.status_msg = format!("Attach failed: {e}");
                 }
+                return;
+            }
+        };
 
-                // Try to locate game data files and load tile atlas + world map
-                self.tile_atlas_error = None;
-                match config::find_game_directory(proc.memory.handle()) {
-                    Ok(dir) => {
-                        match TileAtlas::load(&dir) {
-                            Ok(atlas) => {
-                                self.tile_atlas = Some(atlas);
-                                // Only load the world map if the atlas succeeded
-                                match WorldMap::load(&dir) {
-                                    Ok(wm) => self.world_map = Some(wm),
-                                    Err(e) => {
-                                        self.status_msg = format!(
-                                            "World map failed: {e} (dir: {})",
-                                            dir.display()
-                                        );
-                                    }
-                                }
-                            }
+        self.prepare_for_attach();
+
+        let dos_base = Some(scan_result.dos_base);
+        let game_confirmed = scan_result.game_confirmed;
+        if game_confirmed {
+            self.status_msg = format!("Connected to {} (PID {})", proc.name, proc.pid,);
+        } else {
+            self.status_msg = "Waiting for game to load...".to_string();
+        }
+
+        self.load_game_assets_for_handle(proc.memory.handle());
+
+        self.selected_pid = Some(pid);
+        self.try_acquire_audio(pid);
+        self.attached = Some(AttachedProcess {
+            process: proc,
+            dos_base,
+            game_confirmed,
+        });
+        self.last_rescan = Instant::now();
+
+        if game_confirmed {
+            self.sync_confirmed_game_state();
+        }
+    }
+
+    /// Return whether the current attachment should retry DOSBox config and
+    /// asset discovery once the game becomes confirmed in place.
+    fn needs_game_asset_retry(&self) -> bool {
+        self.game_dir.is_none()
+            || self.tile_atlas.is_none()
+            || self.world_map.is_none()
+            || self.tile_atlas_error.is_some()
+    }
+
+    /// Load the Ultima V asset directory, tile atlas, and world map for a
+    /// DOSBox-family process handle.
+    fn load_game_assets_for_handle(&mut self, handle: HANDLE) {
+        self.game_dir = None;
+        self.tile_atlas = None;
+        self.world_map = None;
+        self.tile_atlas_error = None;
+        match config::find_game_directory(handle) {
+            Ok(dir) => {
+                match TileAtlas::load(&dir) {
+                    Ok(atlas) => {
+                        self.tile_atlas = Some(atlas);
+                        // Only load the world map if the atlas succeeded.
+                        match WorldMap::load(&dir) {
+                            Ok(wm) => self.world_map = Some(wm),
                             Err(e) => {
-                                let load_error = format!(
-                                    "Failed to load tile atlas from {}: {e}",
-                                    dir.display()
-                                );
-                                self.status_msg = load_error.clone();
-                                self.tile_atlas_error = Some(load_error);
+                                self.status_msg =
+                                    format!("World map failed: {e} (dir: {})", dir.display());
                             }
                         }
-                        self.game_dir = Some(dir);
                     }
                     Err(e) => {
-                        let game_dir_error = format!("Game dir not found: {e}");
-                        self.status_msg = game_dir_error.clone();
-                        self.tile_atlas_error = Some(game_dir_error);
+                        let load_error =
+                            format!("Failed to load tile atlas from {}: {e}", dir.display());
+                        self.status_msg = load_error.clone();
+                        self.tile_atlas_error = Some(load_error);
                     }
                 }
-
-                self.selected_pid = Some(pid);
-                self.try_acquire_audio(pid);
-                self.attached = Some(AttachedProcess {
-                    process: proc,
-                    dos_base,
-                    game_confirmed,
-                });
-                self.last_rescan = Instant::now();
-
-                if game_confirmed {
-                    self.sync_confirmed_game_state();
-                }
+                self.game_dir = Some(dir);
             }
             Err(e) => {
-                self.status_msg = format!("Attach failed: {e}");
+                let game_dir_error = format!("Game dir not found: {e}");
+                self.status_msg = game_dir_error.clone();
+                self.tile_atlas_error = Some(game_dir_error);
             }
         }
+    }
+
+    /// Retry asset discovery for the current attachment after an in-place
+    /// transition from unconfirmed to confirmed game state.
+    fn retry_game_assets_for_attached_process(&mut self) {
+        let Some(handle) = self
+            .attached
+            .as_ref()
+            .map(|attached| attached.process.memory.handle())
+        else {
+            return;
+        };
+        self.load_game_assets_for_handle(handle);
     }
 
     fn detach(&mut self) {
@@ -323,6 +404,34 @@ impl UltimaCompanion {
             }
         }
         self.last_rescan = Instant::now();
+    }
+
+    /// Re-run DOS memory scans across the process list and switch to a newly
+    /// confirmed game session when it is uniquely identifiable.
+    fn try_promote_to_confirmed_process(&mut self) {
+        let current_pid = self.attached.as_ref().map(|attached| attached.process.pid);
+        self.scan_processes();
+
+        let Some(pid) = self.unique_confirmed_process_pid() else {
+            return;
+        };
+
+        if current_pid != Some(pid) {
+            self.attach(pid);
+            return;
+        }
+
+        if let Some(attached) = self
+            .attached
+            .as_mut()
+            .filter(|attached| !attached.game_confirmed)
+        {
+            attached.game_confirmed = true;
+            if self.needs_game_asset_retry() {
+                self.retry_game_assets_for_attached_process();
+            }
+            self.sync_confirmed_game_state();
+        }
     }
 
     fn refresh_game_state(&mut self) {
@@ -498,11 +607,7 @@ impl eframe::App for UltimaCompanion {
             // Periodically scan for DOSBox processes.
             if self.last_process_scan.elapsed() >= PROCESS_SCAN_INTERVAL {
                 self.scan_processes();
-                // Auto-attach if exactly one process and not suppressed.
-                if !self.suppress_auto_attach && self.process_list.len() == 1 {
-                    let pid = self.process_list[0].0;
-                    self.attach(pid);
-                }
+                self.auto_attach_preferred_process();
             }
             ctx.request_repaint_after(PROCESS_SCAN_INTERVAL);
         } else if !self.attached.as_ref().unwrap().process.is_alive() {
@@ -516,7 +621,12 @@ impl eframe::App for UltimaCompanion {
                 if self.last_rescan.elapsed() >= RESCAN_INTERVAL {
                     self.rescan_memory();
                     if self.attached.as_ref().is_some_and(|a| a.game_confirmed) {
+                        if self.needs_game_asset_retry() {
+                            self.retry_game_assets_for_attached_process();
+                        }
                         self.sync_confirmed_game_state();
+                    } else {
+                        self.try_promote_to_confirmed_process();
                     }
                 }
                 ctx.request_repaint_after(RESCAN_INTERVAL);
