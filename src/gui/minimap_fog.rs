@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -57,6 +57,7 @@ pub struct FogState {
     enabled: bool,
     game_key: Option<String>,
     scenes: HashMap<FogScene, Vec<u8>>,
+    dirty_scenes: HashSet<FogScene>,
     last_persistence_error: Option<String>,
 }
 
@@ -66,6 +67,7 @@ impl FogState {
             enabled: true,
             game_key: None,
             scenes: HashMap::new(),
+            dirty_scenes: HashSet::new(),
             last_persistence_error: None,
         }
     }
@@ -88,6 +90,7 @@ impl FogState {
         if self.game_key != next {
             self.game_key = next;
             self.scenes.clear();
+            self.dirty_scenes.clear();
             self.last_persistence_error = None;
             true
         } else {
@@ -113,16 +116,13 @@ impl FogState {
         }
         if self.current_game_key() == Some(game_key) {
             self.scenes.clear();
+            self.dirty_scenes.clear();
             self.last_persistence_error = None;
         }
         Ok(())
     }
 
     pub fn record_visible_tiles(&mut self, scene: FogScene, coords: &[(usize, usize)]) {
-        if coords.is_empty() {
-            return;
-        }
-
         let (width, height) = scene.dimensions();
         let mut changed = false;
         {
@@ -139,10 +139,16 @@ impl FogState {
             }
         }
 
-        if changed {
+        if changed || self.dirty_scenes.contains(&scene) {
             match self.save_scene(scene) {
-                Ok(()) => self.last_persistence_error = None,
-                Err(err) => self.last_persistence_error = Some(err.to_string()),
+                Ok(()) => {
+                    self.dirty_scenes.remove(&scene);
+                    self.last_persistence_error = None;
+                }
+                Err(err) => {
+                    self.dirty_scenes.insert(scene);
+                    self.last_persistence_error = Some(err.to_string());
+                }
             }
         }
     }
@@ -270,6 +276,8 @@ fn game_dir_storage_key(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -308,5 +316,80 @@ mod tests {
         assert!(fog.set_game_dir(Some(Path::new(r"C:\Games\Ultima 5"))));
         assert!(!fog.set_game_dir(Some(Path::new(r"c:\games\ultima 5"))));
         assert!(fog.set_game_dir(Some(Path::new(r"C:\Games\Ultima 5 Test"))));
+    }
+
+    #[test]
+    fn record_visible_tiles_retries_dirty_scene_until_persisted() {
+        let _guard = env_lock().lock().unwrap();
+        let mut localappdata = LocalAppDataGuard::new();
+
+        let blocked_root = unique_test_path("ninth-virtue-fog-blocked");
+        fs::write(&blocked_root, b"blocked").unwrap();
+
+        let valid_root = unique_test_path("ninth-virtue-fog-valid");
+        fs::create_dir_all(&valid_root).unwrap();
+
+        let scene = FogScene::Local(7);
+        let mut fog = FogState::new();
+        fog.set_game_dir(Some(Path::new(r"C:\Games\Ultima 5")));
+
+        localappdata.set(&blocked_root);
+        fog.record_visible_tiles(scene, &[(3, 4)]);
+        assert!(fog.dirty_scenes.contains(&scene));
+        assert!(fog.persistence_error().is_some());
+
+        localappdata.set(&valid_root);
+        fog.record_visible_tiles(scene, &[]);
+
+        let scene_path = fog.scene_file_path(scene).unwrap().unwrap();
+        assert!(scene_path.exists());
+        assert!(!fog.dirty_scenes.contains(&scene));
+        assert_eq!(fog.persistence_error(), None);
+        assert_eq!(fs::read(scene_path).unwrap()[4 * 32 + 3], 1);
+
+        fs::remove_file(blocked_root).unwrap();
+        fs::remove_dir_all(valid_root).unwrap();
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn unique_test_path(prefix: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{unique}"))
+    }
+
+    struct LocalAppDataGuard {
+        original: Option<OsString>,
+    }
+
+    impl LocalAppDataGuard {
+        fn new() -> Self {
+            Self {
+                original: std::env::var_os("LOCALAPPDATA"),
+            }
+        }
+
+        fn set(&mut self, value: &Path) {
+            unsafe {
+                std::env::set_var("LOCALAPPDATA", value);
+            }
+        }
+    }
+
+    impl Drop for LocalAppDataGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.original.take() {
+                    Some(value) => std::env::set_var("LOCALAPPDATA", value),
+                    None => std::env::remove_var("LOCALAPPDATA"),
+                }
+            }
+        }
     }
 }
