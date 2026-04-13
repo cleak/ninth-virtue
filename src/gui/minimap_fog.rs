@@ -111,9 +111,7 @@ impl FogState {
     }
 
     pub fn reset_game_by_key(&mut self, game_key: &str) -> io::Result<()> {
-        if let Some(path) = game_dir_path_for_key(game_key)? {
-            remove_fog_root(&path)?;
-        }
+        remove_fog_root(&game_dir_path_for_key(game_key)?)?;
         if self.current_game_key() == Some(game_key) {
             self.scenes.clear();
             self.dirty_scenes.clear();
@@ -199,9 +197,7 @@ impl FogState {
         let Some(game_key) = self.game_key.as_deref() else {
             return Ok(None);
         };
-        let Some(mut path) = game_dir_path_for_key(game_key)? else {
-            return Ok(None);
-        };
+        let mut path = game_dir_path_for_key(game_key)?;
         path.push(scene.file_name());
         Ok(Some(path))
     }
@@ -237,7 +233,7 @@ fn appdata_root() -> Option<PathBuf> {
     Some(path)
 }
 
-fn game_dir_path_for_key(game_key: &str) -> io::Result<Option<PathBuf>> {
+fn game_dir_path_for_key(game_key: &str) -> io::Result<PathBuf> {
     let Some(mut path) = appdata_root() else {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -246,7 +242,7 @@ fn game_dir_path_for_key(game_key: &str) -> io::Result<Option<PathBuf>> {
     };
     path.push(FOG_ROOT_DIR);
     path.push(game_key);
-    Ok(Some(path))
+    Ok(path)
 }
 
 fn remove_fog_root(path: &Path) -> io::Result<()> {
