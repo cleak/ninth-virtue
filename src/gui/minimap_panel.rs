@@ -325,7 +325,7 @@ impl MinimapState {
     }
 
     pub fn fog_reset_confirmation_ready(&self) -> bool {
-        self.fog_reset_confirm_text.trim() == "RESET"
+        self.fog_reset_confirm_text == "RESET"
     }
 
     /// Clear cached map data so the next loaded snapshot forces a fresh upload.
@@ -774,143 +774,149 @@ fn build_fog_texture(
     grid_dims: (u32, u32),
     zoom: usize,
 ) -> Vec<u8> {
-    let len = grid_dims.0 as usize * grid_dims.1 as usize;
+    let grid_dims = (grid_dims.0 as usize, grid_dims.1 as usize);
+    let len = grid_dims.0 * grid_dims.1;
     let Some(scene) = FogScene::from_map(map) else {
         return vec![FOG_VISIBILITY_VISIBLE; len];
     };
 
-    let visible_scene_coords = collect_visible_scene_coords(map);
+    let fog_enabled = state.fog_enabled();
+    let projection = FogProjection::new(map, scene, grid_source, grid_dims, zoom);
+    let visible_scene_coords = projection.visible_scene_coords();
     state.fog.record_visible_tiles(scene, &visible_scene_coords);
-    let explored = state.fog.scene_data(scene).to_vec();
+    let explored = state.fog.scene_data(scene);
     let mut fog = vec![FOG_VISIBILITY_UNSEEN; len];
+    let (scene_w, _) = scene.dimensions();
 
-    for gy in 0..grid_dims.1 as usize {
-        for gx in 0..grid_dims.0 as usize {
-            if let Some((scene_x, scene_y)) =
-                scene_coord_for_grid_cell(map, scene, grid_source, zoom, gx, gy)
+    for gy in 0..grid_dims.1 {
+        for gx in 0..grid_dims.0 {
+            if let Some((scene_x, scene_y)) = projection.scene_coord_for_grid_cell(gx, gy)
+                && explored[scene_y * scene_w + scene_x] != 0
             {
-                let (scene_w, _) = scene.dimensions();
-                if explored[scene_y * scene_w + scene_x] != 0 {
-                    fog[gy * grid_dims.0 as usize + gx] = FOG_VISIBILITY_EXPLORED;
-                }
+                fog[gy * grid_dims.0 + gx] = FOG_VISIBILITY_EXPLORED;
             }
         }
     }
 
     for (scene_x, scene_y) in visible_scene_coords {
-        if let Some((grid_x, grid_y)) = grid_cell_for_scene_coord(
-            map,
-            scene,
-            grid_source,
-            grid_dims.0 as usize,
-            grid_dims.1 as usize,
-            zoom,
-            scene_x,
-            scene_y,
-        ) {
-            let idx = grid_y * grid_dims.0 as usize + grid_x;
+        if let Some((grid_x, grid_y)) = projection.grid_cell_for_scene_coord(scene_x, scene_y) {
+            let idx = grid_y * grid_dims.0 + grid_x;
             fog[idx] = FOG_VISIBILITY_VISIBLE;
         }
     }
 
-    if !state.fog_enabled() {
+    if !fog_enabled {
         fog.fill(FOG_VISIBILITY_VISIBLE);
     }
 
     fog
 }
 
-fn collect_visible_scene_coords(map: &MapState) -> Vec<(usize, usize)> {
-    let Some(tiles) = map.visibility_tiles.as_ref() else {
-        return Vec::new();
-    };
+#[derive(Debug, Clone, Copy)]
+struct FogProjection<'a> {
+    map: &'a MapState,
+    scene: FogScene,
+    grid_source: GridSource,
+    grid_dims: (usize, usize),
+    zoom: usize,
+}
 
-    let mut coords = Vec::new();
-    let player_local = local_scene_player_tile(map);
-    let player_local_x = player_local[0].round() as i32;
-    let player_local_y = player_local[1].round() as i32;
-
-    for vy in 0..VIEWPORT_VISIBILITY_HEIGHT {
-        for vx in 0..VIEWPORT_VISIBILITY_WIDTH {
-            let idx = vy * VIEWPORT_VISIBILITY_WIDTH + vx;
-            if tiles[idx] == FOG_HIDDEN_TILE {
-                continue;
-            }
-
-            let dx = vx as i32 - VIEWPORT_VISIBILITY_WIDTH as i32 / 2;
-            let dy = vy as i32 - VIEWPORT_VISIBILITY_HEIGHT as i32 / 2;
-
-            if map.is_outdoor() {
-                coords.push((
-                    map.x.wrapping_add_signed(dx as i8) as usize,
-                    map.y.wrapping_add_signed(dy as i8) as usize,
-                ));
-            } else {
-                let x = player_local_x + dx;
-                let y = player_local_y + dy;
-                if (0..32).contains(&x) && (0..32).contains(&y) {
-                    coords.push((x as usize, y as usize));
-                }
-            }
+impl<'a> FogProjection<'a> {
+    fn new(
+        map: &'a MapState,
+        scene: FogScene,
+        grid_source: GridSource,
+        grid_dims: (usize, usize),
+        zoom: usize,
+    ) -> Self {
+        Self {
+            map,
+            scene,
+            grid_source,
+            grid_dims,
+            zoom,
         }
     }
 
-    coords
-}
+    fn visible_scene_coords(&self) -> Vec<(usize, usize)> {
+        let Some(tiles) = self.map.visibility_tiles.as_ref() else {
+            return Vec::new();
+        };
 
-fn scene_coord_for_grid_cell(
-    map: &MapState,
-    scene: FogScene,
-    grid_source: GridSource,
-    zoom: usize,
-    grid_x: usize,
-    grid_y: usize,
-) -> Option<(usize, usize)> {
-    match scene {
-        FogScene::Britannia | FogScene::Underworld => match grid_source {
-            GridSource::Outdoor => {
-                let half = zoom as i32 / 2;
-                Some((
-                    (map.x as i32 - half + grid_x as i32).rem_euclid(256) as usize,
-                    (map.y as i32 - half + grid_y as i32).rem_euclid(256) as usize,
-                ))
+        let mut coords = Vec::new();
+        let (scene_w, scene_h) = self.scene.dimensions();
+        let player_local = local_scene_player_tile(self.map);
+        let player_local_x = player_local[0].round() as i32;
+        let player_local_y = player_local[1].round() as i32;
+
+        for vy in 0..VIEWPORT_VISIBILITY_HEIGHT {
+            for vx in 0..VIEWPORT_VISIBILITY_WIDTH {
+                let idx = vy * VIEWPORT_VISIBILITY_WIDTH + vx;
+                if tiles[idx] == FOG_HIDDEN_TILE {
+                    continue;
+                }
+
+                let dx = vx as i32 - VIEWPORT_VISIBILITY_WIDTH as i32 / 2;
+                let dy = vy as i32 - VIEWPORT_VISIBILITY_HEIGHT as i32 / 2;
+
+                match self.scene {
+                    FogScene::Britannia | FogScene::Underworld => coords.push((
+                        self.map.x.wrapping_add_signed(dx as i8) as usize,
+                        self.map.y.wrapping_add_signed(dy as i8) as usize,
+                    )),
+                    FogScene::Local(_) => {
+                        let x = player_local_x + dx;
+                        let y = player_local_y + dy;
+                        if (0..scene_w as i32).contains(&x) && (0..scene_h as i32).contains(&y) {
+                            coords.push((x as usize, y as usize));
+                        }
+                    }
+                }
             }
-            GridSource::Local => Some((
-                map.scroll_x.wrapping_add(grid_x as u8) as usize,
-                map.scroll_y.wrapping_add(grid_y as u8) as usize,
-            )),
-        },
-        FogScene::Local(_) => Some((grid_x, grid_y)),
-    }
-}
+        }
 
-fn grid_cell_for_scene_coord(
-    map: &MapState,
-    scene: FogScene,
-    grid_source: GridSource,
-    grid_w: usize,
-    grid_h: usize,
-    zoom: usize,
-    scene_x: usize,
-    scene_y: usize,
-) -> Option<(usize, usize)> {
-    match scene {
-        FogScene::Britannia | FogScene::Underworld => {
-            let (top_left_x, top_left_y) = match grid_source {
+        coords
+    }
+
+    fn scene_coord_for_grid_cell(&self, grid_x: usize, grid_y: usize) -> Option<(usize, usize)> {
+        match self.scene {
+            FogScene::Britannia | FogScene::Underworld => match self.grid_source {
                 GridSource::Outdoor => {
-                    let half = zoom as i32 / 2;
-                    (
-                        (map.x as i32 - half).rem_euclid(256) as usize,
-                        (map.y as i32 - half).rem_euclid(256) as usize,
-                    )
+                    let half = self.zoom as i32 / 2;
+                    Some((
+                        (self.map.x as i32 - half + grid_x as i32).rem_euclid(256) as usize,
+                        (self.map.y as i32 - half + grid_y as i32).rem_euclid(256) as usize,
+                    ))
                 }
-                GridSource::Local => (map.scroll_x as usize, map.scroll_y as usize),
-            };
-            let grid_x = (scene_x + 256 - top_left_x) % 256;
-            let grid_y = (scene_y + 256 - top_left_y) % 256;
-            (grid_x < grid_w && grid_y < grid_h).then_some((grid_x, grid_y))
+                GridSource::Local => Some((
+                    self.map.scroll_x.wrapping_add(grid_x as u8) as usize,
+                    self.map.scroll_y.wrapping_add(grid_y as u8) as usize,
+                )),
+            },
+            FogScene::Local(_) => Some((grid_x, grid_y)),
         }
-        FogScene::Local(_) => (scene_x < grid_w && scene_y < grid_h).then_some((scene_x, scene_y)),
+    }
+
+    fn grid_cell_for_scene_coord(&self, scene_x: usize, scene_y: usize) -> Option<(usize, usize)> {
+        match self.scene {
+            FogScene::Britannia | FogScene::Underworld => {
+                let (top_left_x, top_left_y) = match self.grid_source {
+                    GridSource::Outdoor => {
+                        let half = self.zoom as i32 / 2;
+                        (
+                            (self.map.x as i32 - half).rem_euclid(256) as usize,
+                            (self.map.y as i32 - half).rem_euclid(256) as usize,
+                        )
+                    }
+                    GridSource::Local => (self.map.scroll_x as usize, self.map.scroll_y as usize),
+                };
+                let grid_x = (scene_x + 256 - top_left_x) % 256;
+                let grid_y = (scene_y + 256 - top_left_y) % 256;
+                (grid_x < self.grid_dims.0 && grid_y < self.grid_dims.1).then_some((grid_x, grid_y))
+            }
+            FogScene::Local(_) => (scene_x < self.grid_dims.0 && scene_y < self.grid_dims.1)
+                .then_some((scene_x, scene_y)),
+        }
     }
 }
 
@@ -1940,6 +1946,7 @@ fn world_marker_color(category: WorldLabelCategory) -> Color32 {
 mod tests {
     use super::*;
     use crate::game::map::LocationType;
+    use crate::game::offsets::VIEWPORT_VISIBILITY_LEN;
     use crate::game::quest::Virtue;
     use crate::game::world_map::{WorldLabelKind, WorldLocation};
 
@@ -2448,11 +2455,66 @@ mod tests {
         assert!(!state.fog_reset_confirmation_ready());
 
         *state.fog_reset_confirmation_text() = " RESET ".to_string();
+        assert!(!state.fog_reset_confirmation_ready());
+
+        *state.fog_reset_confirmation_text() = "RESET".to_string();
         assert!(state.fog_reset_confirmation_ready());
 
         state.cancel_fog_reset_confirmation();
         assert!(!state.fog_reset_confirmation_open());
         assert!(state.fog_reset_confirmation_text().is_empty());
+    }
+
+    #[test]
+    fn fog_projection_wraps_outdoor_scene_coordinates_from_world_view() {
+        let map = MapState {
+            location: LocationType::Overworld,
+            z: 0,
+            x: 2,
+            y: 250,
+            dungeon_facing: None,
+            transport: 0,
+            scroll_x: 0,
+            scroll_y: 0,
+            tiles: [0; 1024],
+            combat_tiles: None,
+            visibility_tiles: None,
+            objects: Vec::new(),
+        };
+        let projection =
+            FogProjection::new(&map, FogScene::Britannia, GridSource::Outdoor, (16, 16), 16);
+
+        assert_eq!(projection.scene_coord_for_grid_cell(0, 0), Some((250, 242)));
+        assert_eq!(projection.grid_cell_for_scene_coord(2, 250), Some((8, 8)));
+        assert_eq!(projection.grid_cell_for_scene_coord(1, 249), Some((7, 7)));
+    }
+
+    #[test]
+    fn fog_projection_clamps_local_visibility_to_scene_bounds() {
+        let mut visibility = [FOG_HIDDEN_TILE; VIEWPORT_VISIBILITY_LEN];
+        let center = (VIEWPORT_VISIBILITY_HEIGHT / 2) * VIEWPORT_VISIBILITY_WIDTH
+            + VIEWPORT_VISIBILITY_WIDTH / 2;
+        visibility[center] = 0x01;
+        visibility[0] = 0x01;
+
+        let map = MapState {
+            location: LocationType::Town(2),
+            z: 0,
+            x: 0,
+            y: 0,
+            dungeon_facing: None,
+            transport: 0,
+            scroll_x: 0,
+            scroll_y: 0,
+            tiles: [0; 1024],
+            combat_tiles: None,
+            visibility_tiles: Some(visibility),
+            objects: Vec::new(),
+        };
+        let projection =
+            FogProjection::new(&map, FogScene::Local(2), GridSource::Local, (32, 32), 32);
+
+        assert_eq!(projection.visible_scene_coords(), vec![(0, 0)]);
     }
 
     #[test]

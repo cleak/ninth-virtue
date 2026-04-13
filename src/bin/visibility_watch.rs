@@ -20,20 +20,29 @@ use ninth_virtue::game::offsets::{
     COMBAT_TERRAIN_GRID, COMBAT_TERRAIN_HEIGHT, COMBAT_TERRAIN_STRIDE, COMBAT_TERRAIN_WIDTH,
     DUNGEON_FLOORS, DUNGEON_LEVEL_HEIGHT, DUNGEON_LEVEL_LEN, DUNGEON_LEVEL_WIDTH,
     DUNGEON_TILES_LEN, DUNGEON_TILES_SAVE_OFFSET, LIGHT_INTENSITY, LIGHT_SPELL_DUR, MAP_SCROLL_X,
-    MAP_SCROLL_Y, MAP_TILES, MAP_TILES_LEN, TORCH_DUR, ds_addr, inv_addr,
+    MAP_SCROLL_Y, MAP_TILES, MAP_TILES_LEN, TORCH_DUR, VIEWPORT_VISIBILITY_GRID,
+    VIEWPORT_VISIBILITY_HEIGHT, VIEWPORT_VISIBILITY_STRIDE, VIEWPORT_VISIBILITY_WIDTH, ds_addr,
+    inv_addr,
 };
 use ninth_virtue::memory::access::MemoryAccess;
 use ninth_virtue::memory::{process, scanner};
-
-const VIEWPORT_SCRATCH_DS: usize = 0xAB02;
-const VIEWPORT_ACTIVE_WIDTH: usize = 11;
-const VIEWPORT_STRIDE: usize = 0x20;
-const VIEWPORT_ROWS: usize = 11;
 
 struct Options {
     pid: Option<u32>,
     out_dir: PathBuf,
     label: String,
+}
+
+struct SnapshotSummary<'a> {
+    process_name: &'a str,
+    pid: u32,
+    dos_base: usize,
+    map_state: &'a map::MapState,
+    scroll_x: u8,
+    scroll_y: u8,
+    light_intensity: u8,
+    light_spell_dur: u8,
+    torch_dur: u8,
 }
 
 fn main() -> Result<()> {
@@ -59,8 +68,8 @@ fn main() -> Result<()> {
 
     let viewport_scratch = read_bytes(
         mem,
-        ds_addr(scan.dos_base, VIEWPORT_SCRATCH_DS),
-        VIEWPORT_STRIDE * VIEWPORT_ROWS,
+        ds_addr(scan.dos_base, VIEWPORT_VISIBILITY_GRID),
+        VIEWPORT_VISIBILITY_STRIDE * VIEWPORT_VISIBILITY_HEIGHT,
     )?;
     let combat_scratch = read_bytes(
         mem,
@@ -76,26 +85,26 @@ fn main() -> Result<()> {
 
     write_text(
         &output_dir.join("summary.txt"),
-        &build_summary(
-            &name,
+        &build_summary(&SnapshotSummary {
+            process_name: &name,
             pid,
-            scan.dos_base,
-            &map_state,
+            dos_base: scan.dos_base,
+            map_state: &map_state,
             scroll_x,
             scroll_y,
             light_intensity,
             light_spell_dur,
             torch_dur,
-        ),
+        }),
     )?;
     write_text(
         &output_dir.join("viewport-ab02.txt"),
         &format_strided_grid(
             "DS:0xAB02 viewport scratch",
             &viewport_scratch,
-            VIEWPORT_ACTIVE_WIDTH,
-            VIEWPORT_STRIDE,
-            VIEWPORT_ROWS,
+            VIEWPORT_VISIBILITY_WIDTH,
+            VIEWPORT_VISIBILITY_STRIDE,
+            VIEWPORT_VISIBILITY_HEIGHT,
         ),
     )?;
     write_text(
@@ -221,44 +230,49 @@ fn write_text(path: &Path, text: &str) -> Result<()> {
     fs::write(path, text).with_context(|| format!("writing {}", path.display()))
 }
 
-fn build_summary(
-    process_name: &str,
-    pid: u32,
-    dos_base: usize,
-    map_state: &map::MapState,
-    scroll_x: u8,
-    scroll_y: u8,
-    light_intensity: u8,
-    light_spell_dur: u8,
-    torch_dur: u8,
-) -> String {
+fn build_summary(summary: &SnapshotSummary<'_>) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "Process: {process_name} (PID {pid})");
-    let _ = writeln!(out, "DOS base: 0x{dos_base:05X}");
-    let _ = writeln!(out, "Location: {}", map_state.display_location_name());
-    let _ = writeln!(out, "Location enum: {:?}", map_state.location);
+    let _ = writeln!(
+        out,
+        "Process: {} (PID {})",
+        summary.process_name, summary.pid
+    );
+    let _ = writeln!(out, "DOS base: 0x{:05X}", summary.dos_base);
+    let _ = writeln!(
+        out,
+        "Location: {}",
+        summary.map_state.display_location_name()
+    );
+    let _ = writeln!(out, "Location enum: {:?}", summary.map_state.location);
     let _ = writeln!(
         out,
         "Position: x={} y={} z={}",
-        map_state.x, map_state.y, map_state.z
+        summary.map_state.x, summary.map_state.y, summary.map_state.z
     );
-    let _ = writeln!(out, "Scroll: x={scroll_x} y={scroll_y}");
-    let _ = writeln!(out, "Dungeon facing: {:?}", map_state.dungeon_facing);
-    let _ = writeln!(out, "Objects: {}", map_state.objects.len());
+    let _ = writeln!(out, "Scroll: x={} y={}", summary.scroll_x, summary.scroll_y);
     let _ = writeln!(
         out,
-        "Light intensity (save+0x2FF): 0x{light_intensity:02X} ({light_intensity})"
+        "Dungeon facing: {:?}",
+        summary.map_state.dungeon_facing
+    );
+    let _ = writeln!(out, "Objects: {}", summary.map_state.objects.len());
+    let _ = writeln!(
+        out,
+        "Light intensity (save+0x2FF): 0x{:02X} ({})",
+        summary.light_intensity, summary.light_intensity
     );
     let _ = writeln!(
         out,
-        "Light spell dur (save+0x300): 0x{light_spell_dur:02X} ({light_spell_dur})"
+        "Light spell dur (save+0x300): 0x{:02X} ({})",
+        summary.light_spell_dur, summary.light_spell_dur
     );
     let _ = writeln!(
         out,
-        "Torch dur (save+0x301): 0x{torch_dur:02X} ({torch_dur})"
+        "Torch dur (save+0x301): 0x{:02X} ({})",
+        summary.torch_dur, summary.torch_dur
     );
     let _ = writeln!(out, "Scene notes:");
-    match map_state.location {
+    match summary.map_state.location {
         LocationType::Combat(_) => {
             let _ = writeln!(
                 out,
