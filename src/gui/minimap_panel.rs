@@ -220,6 +220,7 @@ pub struct MinimapState {
     fog_reset_confirm_open: bool,
     fog_reset_confirm_text: String,
     fog_reset_error: Option<String>,
+    fog_reset_target_game_key: Option<String>,
 }
 
 impl Default for MinimapState {
@@ -249,6 +250,7 @@ impl Default for MinimapState {
             fog_reset_confirm_open: false,
             fog_reset_confirm_text: String::new(),
             fog_reset_error: None,
+            fog_reset_target_game_key: None,
         }
     }
 }
@@ -289,7 +291,9 @@ impl MinimapState {
     }
 
     pub fn set_game_directory(&mut self, game_dir: Option<&Path>) {
-        self.fog.set_game_dir(game_dir);
+        if self.fog.set_game_dir(game_dir) {
+            self.cancel_fog_reset_confirmation();
+        }
     }
 
     pub fn fog_enabled(&self) -> bool {
@@ -308,8 +312,18 @@ impl MinimapState {
         self.fog.can_reset()
     }
 
+    pub fn fog_persistence_error(&self) -> Option<&str> {
+        self.fog.persistence_error()
+    }
+
     pub fn reset_fog(&mut self) -> std::io::Result<()> {
-        self.fog.reset_current_game()?;
+        let Some(target_game_key) = self.fog_reset_target_game_key.as_deref() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "no fog reset target is selected",
+            ));
+        };
+        self.fog.reset_game_by_key(target_game_key)?;
         self.fog_reset_error = None;
         Ok(())
     }
@@ -318,12 +332,14 @@ impl MinimapState {
         self.fog_reset_confirm_open = true;
         self.fog_reset_confirm_text.clear();
         self.fog_reset_error = None;
+        self.fog_reset_target_game_key = self.fog.current_game_key().map(str::to_owned);
     }
 
     pub fn cancel_fog_reset_confirmation(&mut self) {
         self.fog_reset_confirm_open = false;
         self.fog_reset_confirm_text.clear();
         self.fog_reset_error = None;
+        self.fog_reset_target_game_key = None;
     }
 
     pub fn fog_reset_confirmation_open(&self) -> bool {
@@ -656,6 +672,13 @@ fn render_minimap_header(
                     ui.checkbox(&mut state.label_filters.shrines, "Shrines");
                 });
             });
+        }
+
+        if let Some(error) = state.fog_persistence_error() {
+            ui.colored_label(
+                Color32::from_rgb(225, 109, 109),
+                format!("Fog save failed: {error}"),
+            );
         }
     });
 }
@@ -2189,6 +2212,7 @@ mod tests {
         });
         state.raw_atlas = Some(Arc::new(vec![1, 2, 3]));
         state.fog_reset_error = Some("disk error".to_string());
+        state.fog_reset_target_game_key = Some("game-key".to_string());
 
         {
             let mut gpu = state.gpu.lock().unwrap();
@@ -2208,6 +2232,7 @@ mod tests {
         assert!(state.raw_atlas.is_none());
         assert!(state.last_grid_key.is_none());
         assert!(state.fog_reset_error().is_none());
+        assert!(state.fog_reset_target_game_key.is_none());
 
         let gpu = state.gpu.lock().unwrap();
         // clear() must drop the GL-backed renderer so the next paint callback rebuilds it.
@@ -2480,9 +2505,14 @@ mod tests {
     #[test]
     fn fog_reset_confirmation_requires_exact_reset_token() {
         let mut state = MinimapState::new();
+        state.set_game_directory(Some(Path::new(r"C:\Games\Ultima 5")));
         state.begin_fog_reset_confirmation();
         assert!(state.fog_reset_confirmation_open());
         assert!(!state.fog_reset_confirmation_ready());
+        assert_eq!(
+            state.fog_reset_target_game_key.as_deref(),
+            state.fog.current_game_key()
+        );
 
         *state.fog_reset_confirmation_text() = "reset".to_string();
         assert!(!state.fog_reset_confirmation_ready());
@@ -2496,6 +2526,21 @@ mod tests {
         state.cancel_fog_reset_confirmation();
         assert!(!state.fog_reset_confirmation_open());
         assert!(state.fog_reset_confirmation_text().is_empty());
+        assert!(state.fog_reset_target_game_key.is_none());
+    }
+
+    #[test]
+    fn changing_game_directory_cancels_fog_reset_confirmation() {
+        let mut state = MinimapState::new();
+        state.set_game_directory(Some(Path::new(r"C:\Games\Ultima 5")));
+        state.begin_fog_reset_confirmation();
+        *state.fog_reset_confirmation_text() = "RESET".to_string();
+
+        state.set_game_directory(Some(Path::new(r"C:\Games\Ultima 5 Test")));
+
+        assert!(!state.fog_reset_confirmation_open());
+        assert!(state.fog_reset_confirmation_text().is_empty());
+        assert!(state.fog_reset_target_game_key.is_none());
     }
 
     #[test]

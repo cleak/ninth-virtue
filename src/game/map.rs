@@ -286,7 +286,7 @@ pub fn read_map_state(mem: &dyn MemoryAccess, dos_base: usize) -> Result<MapStat
         | LocationType::Town(_)
         | LocationType::Dwelling(_)
         | LocationType::Castle(_)
-        | LocationType::Keep(_) => Some(read_visibility_window(mem, dos_base)?),
+        | LocationType::Keep(_) => read_visibility_window(mem, dos_base).ok(),
         LocationType::Dungeon(_) | LocationType::Combat(_) => None,
     };
 
@@ -479,6 +479,33 @@ mod tests {
         assert!(state.visibility_tiles.is_none());
         assert_eq!(combat_tiles[0], 0);
         assert_eq!(combat_tiles[1], 1);
+    }
+
+    #[test]
+    fn read_map_state_treats_visibility_window_as_best_effort() {
+        let visibility_addr = ds_addr(0, VIEWPORT_VISIBILITY_GRID);
+        let mock = MockMemory::new(visibility_addr + VIEWPORT_VISIBILITY_LEN - 1);
+
+        let base = SAVE_BASE;
+        mock.write_u8(base + MAP_LOCATION, 2).unwrap();
+        mock.write_u8(base + MAP_Z, 0).unwrap();
+        mock.write_u8(base + MAP_X, 10).unwrap();
+        mock.write_u8(base + MAP_Y, 12).unwrap();
+        mock.write_u8(base + MAP_TRANSPORT, 0).unwrap();
+        mock.write_u8(base + MAP_SCROLL_X, 8).unwrap();
+        mock.write_u8(base + MAP_SCROLL_Y, 9).unwrap();
+
+        for i in 0..MAP_TILES_LEN {
+            mock.write_u8(base + MAP_TILES + i, 0x05).unwrap();
+        }
+
+        let state = read_map_state(&mock, 0)
+            .expect("visibility scratch read failures should not abort the map snapshot");
+        assert_eq!(state.location, LocationType::Town(2));
+        assert_eq!(state.x, 10);
+        assert_eq!(state.y, 12);
+        assert_eq!(state.tiles[0], 0x05);
+        assert!(state.visibility_tiles.is_none());
     }
 
     #[test]

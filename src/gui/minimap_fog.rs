@@ -57,6 +57,7 @@ pub struct FogState {
     enabled: bool,
     game_key: Option<String>,
     scenes: HashMap<FogScene, Vec<u8>>,
+    last_persistence_error: Option<String>,
 }
 
 impl FogState {
@@ -65,6 +66,7 @@ impl FogState {
             enabled: true,
             game_key: None,
             scenes: HashMap::new(),
+            last_persistence_error: None,
         }
     }
 
@@ -81,11 +83,15 @@ impl FogState {
         save_fog_enabled(enabled);
     }
 
-    pub fn set_game_dir(&mut self, game_dir: Option<&Path>) {
+    pub fn set_game_dir(&mut self, game_dir: Option<&Path>) -> bool {
         let next = game_dir.map(game_dir_storage_key);
         if self.game_key != next {
             self.game_key = next;
             self.scenes.clear();
+            self.last_persistence_error = None;
+            true
+        } else {
+            false
         }
     }
 
@@ -93,11 +99,22 @@ impl FogState {
         self.game_key.is_some()
     }
 
-    pub fn reset_current_game(&mut self) -> io::Result<()> {
-        if let Some(path) = self.current_game_dir_path() {
+    pub fn current_game_key(&self) -> Option<&str> {
+        self.game_key.as_deref()
+    }
+
+    pub fn persistence_error(&self) -> Option<&str> {
+        self.last_persistence_error.as_deref()
+    }
+
+    pub fn reset_game_by_key(&mut self, game_key: &str) -> io::Result<()> {
+        if let Some(path) = game_dir_path_for_key(game_key)? {
             remove_fog_root(&path)?;
         }
-        self.scenes.clear();
+        if self.current_game_key() == Some(game_key) {
+            self.scenes.clear();
+            self.last_persistence_error = None;
+        }
         Ok(())
     }
 
@@ -123,7 +140,10 @@ impl FogState {
         }
 
         if changed {
-            self.save_scene(scene);
+            match self.save_scene(scene) {
+                Ok(()) => self.last_persistence_error = None,
+                Err(err) => self.last_persistence_error = Some(err.to_string()),
+            }
         }
     }
 
@@ -142,7 +162,7 @@ impl FogState {
     fn load_scene(&self, scene: FogScene) -> Vec<u8> {
         let (width, height) = scene.dimensions();
         let expected_len = width * height;
-        let Some(path) = self.scene_file_path(scene) else {
+        let Ok(Some(path)) = self.scene_file_path(scene) else {
             return vec![0; expected_len];
         };
         let Ok(bytes) = fs::read(path) else {
@@ -155,30 +175,29 @@ impl FogState {
         }
     }
 
-    fn save_scene(&self, scene: FogScene) {
-        let Some(path) = self.scene_file_path(scene) else {
-            return;
-        };
+    fn save_scene(&self, scene: FogScene) -> io::Result<()> {
         let Some(data) = self.scenes.get(&scene) else {
-            return;
+            return Ok(());
+        };
+        let Some(path) = self.scene_file_path(scene)? else {
+            return Ok(());
         };
         if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
+            fs::create_dir_all(parent)?;
         }
-        let _ = fs::write(path, data);
+        fs::write(path, data)?;
+        Ok(())
     }
 
-    fn scene_file_path(&self, scene: FogScene) -> Option<PathBuf> {
-        let mut path = self.current_game_dir_path()?;
+    fn scene_file_path(&self, scene: FogScene) -> io::Result<Option<PathBuf>> {
+        let Some(game_key) = self.game_key.as_deref() else {
+            return Ok(None);
+        };
+        let Some(mut path) = game_dir_path_for_key(game_key)? else {
+            return Ok(None);
+        };
         path.push(scene.file_name());
-        Some(path)
-    }
-
-    fn current_game_dir_path(&self) -> Option<PathBuf> {
-        let mut path = appdata_root()?;
-        path.push(FOG_ROOT_DIR);
-        path.push(self.game_key.as_deref()?);
-        Some(path)
+        Ok(Some(path))
     }
 }
 
@@ -210,6 +229,18 @@ fn appdata_root() -> Option<PathBuf> {
     let mut path = PathBuf::from(base);
     path.push("The Ninth Virtue");
     Some(path)
+}
+
+fn game_dir_path_for_key(game_key: &str) -> io::Result<Option<PathBuf>> {
+    let Some(mut path) = appdata_root() else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "LOCALAPPDATA or APPDATA is unavailable",
+        ));
+    };
+    path.push(FOG_ROOT_DIR);
+    path.push(game_key);
+    Ok(Some(path))
 }
 
 fn remove_fog_root(path: &Path) -> io::Result<()> {
@@ -268,5 +299,14 @@ mod tests {
         assert_ne!(err.kind(), io::ErrorKind::NotFound);
 
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn set_game_dir_reports_when_key_changes() {
+        let mut fog = FogState::new();
+
+        assert!(fog.set_game_dir(Some(Path::new(r"C:\Games\Ultima 5"))));
+        assert!(!fog.set_game_dir(Some(Path::new(r"c:\games\ultima 5"))));
+        assert!(fog.set_game_dir(Some(Path::new(r"C:\Games\Ultima 5 Test"))));
     }
 }
