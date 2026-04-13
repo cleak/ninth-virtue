@@ -5,7 +5,9 @@ use crate::game::offsets::{
     DUNGEON_ORIENTATION, DUNGEON_TILES_DS_OFFSET, DUNGEON_TILES_LEN, DUNGEON_TILES_SAVE_OFFSET,
     MAP_LOCATION, MAP_SCROLL_X, MAP_SCROLL_Y, MAP_TILES, MAP_TILES_LEN, MAP_TRANSPORT, MAP_X,
     MAP_Y, MAP_Z, OBJ_FLOOR, OBJ_TILE1, OBJ_X, OBJ_Y, OBJECT_ENTRY_SIZE, OBJECT_TABLE,
-    OBJECT_TABLE_SLOTS, ds_addr, inv_addr,
+    OBJECT_TABLE_SLOTS, VIEWPORT_VISIBILITY_GRID, VIEWPORT_VISIBILITY_HEIGHT,
+    VIEWPORT_VISIBILITY_LEN, VIEWPORT_VISIBILITY_STRIDE, VIEWPORT_VISIBILITY_WIDTH, ds_addr,
+    inv_addr,
 };
 use crate::memory::access::MemoryAccess;
 
@@ -192,6 +194,10 @@ pub struct MapState {
     pub tiles: [u8; MAP_TILES_LEN],
     /// Raw combat terrain scratch buffer, when the current scene is combat.
     pub combat_tiles: Option<[u8; COMBAT_TERRAIN_LEN]>,
+    /// Current 2D visibility window from the engine-owned DS:0xAB02 scratch
+    /// grid, flattened to an 11x11 active region. Hidden cells read back as
+    /// 0xFF. Present only for overworld and 2D local scenes.
+    pub visibility_tiles: Option<[u8; VIEWPORT_VISIBILITY_LEN]>,
     /// Active objects on the map (NPCs, monsters, vehicles).
     /// Each entry has a tile byte (add 0x100 for the full tile index) and position.
     pub objects: Vec<ObjectEntry>,
@@ -275,6 +281,14 @@ pub fn read_map_state(mem: &dyn MemoryAccess, dos_base: usize) -> Result<MapStat
     } else {
         None
     };
+    let visibility_tiles = match location {
+        LocationType::Overworld
+        | LocationType::Town(_)
+        | LocationType::Dwelling(_)
+        | LocationType::Castle(_)
+        | LocationType::Keep(_) => Some(read_visibility_window(mem, dos_base)?),
+        LocationType::Dungeon(_) | LocationType::Combat(_) => None,
+    };
 
     let objects = read_objects(mem, dos_base).unwrap_or_default();
 
@@ -289,8 +303,27 @@ pub fn read_map_state(mem: &dyn MemoryAccess, dos_base: usize) -> Result<MapStat
         scroll_y,
         tiles,
         combat_tiles,
+        visibility_tiles,
         objects,
     })
+}
+
+fn read_visibility_window(
+    mem: &dyn MemoryAccess,
+    dos_base: usize,
+) -> Result<[u8; VIEWPORT_VISIBILITY_LEN]> {
+    let mut scratch = [0u8; VIEWPORT_VISIBILITY_STRIDE * VIEWPORT_VISIBILITY_HEIGHT];
+    mem.read_bytes(ds_addr(dos_base, VIEWPORT_VISIBILITY_GRID), &mut scratch)?;
+
+    let mut active = [0u8; VIEWPORT_VISIBILITY_LEN];
+    for row in 0..VIEWPORT_VISIBILITY_HEIGHT {
+        let src = row * VIEWPORT_VISIBILITY_STRIDE;
+        let dst = row * VIEWPORT_VISIBILITY_WIDTH;
+        active[dst..dst + VIEWPORT_VISIBILITY_WIDTH]
+            .copy_from_slice(&scratch[src..src + VIEWPORT_VISIBILITY_WIDTH]);
+    }
+
+    Ok(active)
 }
 
 /// Read active objects from the 32-slot object table as a single snapshot.
@@ -391,6 +424,7 @@ mod tests {
         assert_eq!(state.tiles[0], 0x01); // water
         assert_eq!(state.tiles[1], 0x05); // grass
         assert!(state.combat_tiles.is_none());
+        assert!(state.visibility_tiles.is_some());
         assert!(state.objects.is_empty()); // no objects written
     }
 
@@ -418,6 +452,7 @@ mod tests {
             .combat_tiles
             .expect("combat scenes should read the scratch grid");
         assert_eq!(state.location, LocationType::Combat(0xFF));
+        assert!(state.visibility_tiles.is_none());
         assert_eq!(combat_tiles[0], 0);
         assert_eq!(combat_tiles[1], 1);
     }
@@ -445,6 +480,7 @@ mod tests {
         let state = read_map_state(&mock, 0).unwrap();
         assert_eq!(state.location, LocationType::Dungeon(34));
         assert_eq!(state.dungeon_facing, Some(CardinalDirection::South));
+        assert!(state.visibility_tiles.is_none());
         assert_eq!(state.tiles[0], 0);
         assert_eq!(state.tiles[DUNGEON_LEVEL_LEN - 1], 63);
         assert_eq!(state.tiles[DUNGEON_LEVEL_LEN], 0);
@@ -564,6 +600,7 @@ mod tests {
             scroll_y: 0,
             tiles: [0; MAP_TILES_LEN],
             combat_tiles: None,
+            visibility_tiles: None,
             objects: Vec::new(),
         };
 

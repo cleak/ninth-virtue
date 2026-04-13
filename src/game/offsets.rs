@@ -32,6 +32,9 @@ pub const MAP_X: usize = 0x2F0;
 pub const MAP_Y: usize = 0x2F1;
 pub const MAP_SCROLL_X: usize = 0x2F5;
 pub const MAP_SCROLL_Y: usize = 0x2F6;
+pub const LIGHT_INTENSITY: usize = 0x2FF;
+pub const LIGHT_SPELL_DUR: usize = 0x300;
+pub const TORCH_DUR: usize = 0x301;
 /// Dungeon-facing orientation: 0=north, 1=east, 2=south, 3=west.
 pub const DUNGEON_ORIENTATION: usize = 0x105D;
 /// Save-relative alias for the active dungeon terrain buffer.
@@ -66,6 +69,13 @@ pub const COMBAT_TERRAIN_WIDTH: usize = 11;
 pub const COMBAT_TERRAIN_HEIGHT: usize = 11;
 pub const COMBAT_TERRAIN_STRIDE: usize = 32;
 pub const COMBAT_TERRAIN_LEN: usize = COMBAT_TERRAIN_HEIGHT * COMBAT_TERRAIN_STRIDE;
+/// Current 2D visibility scratch grid (DS:0xAB02): 11 active columns per row
+/// with a 32-byte stride. Hidden cells read back as 0xFF.
+pub const VIEWPORT_VISIBILITY_GRID: usize = 0xAB02;
+pub const VIEWPORT_VISIBILITY_WIDTH: usize = 11;
+pub const VIEWPORT_VISIBILITY_HEIGHT: usize = 11;
+pub const VIEWPORT_VISIBILITY_STRIDE: usize = 32;
+pub const VIEWPORT_VISIBILITY_LEN: usize = VIEWPORT_VISIBILITY_WIDTH * VIEWPORT_VISIBILITY_HEIGHT;
 
 // Inventory save offsets (add SAVE_BASE for DOS address)
 pub const INV_FOOD: usize = 0x202;
@@ -175,9 +185,9 @@ pub fn label_for_save_offset(offset: usize) -> Option<&'static str> {
         0x2F5 => Some("chunk_x"),
         0x2F6 => Some("chunk_y"),
         UPDATE_MAP => Some("UPDATE_MAP"),
-        0x2FF => Some("light_intensity"),
-        0x300 => Some("light_spell_dur"),
-        0x301 => Some("torch_dur"),
+        LIGHT_INTENSITY => Some("light_intensity"),
+        LIGHT_SPELL_DUR => Some("light_spell_dur"),
+        TORCH_DUR => Some("torch_dur"),
         NEW_PROMPT => Some("NEW_PROMPT"),
         DUNGEON_ORIENTATION => Some("dungeon_orientation"),
         SHRINE_ORDAINED => Some("shrine_ordained"),

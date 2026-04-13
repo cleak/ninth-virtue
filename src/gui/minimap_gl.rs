@@ -35,6 +35,7 @@ uniform sampler2D u_atlas;
 uniform sampler2D u_filtered_atlas;
 uniform sampler2D u_objects;
 uniform sampler2D u_lowpass;
+uniform sampler2D u_fog;
 uniform vec2 u_grid_size;
 uniform float u_atlas_cols;
 uniform float u_atlas_rows;
@@ -193,7 +194,8 @@ void main() {
     // The zoom ramps decide when to switch representations; each zoomed-out
     // representation already carries its own coverage-based brightness fix.
     frag_color = mix(atlas_color, lowpass_display, lowpass_mix);
-
+    float fog_visibility = texture(u_fog, grid_uv).r;
+    frag_color = vec4(frag_color.rgb * fog_visibility, 1.0);
 }
 "#;
 
@@ -221,6 +223,7 @@ pub struct MinimapGl {
     grid_texture: glow::Texture,
     objects_texture: glow::Texture,
     lowpass_texture: glow::Texture,
+    fog_texture: glow::Texture,
     u_grid_size: glow::UniformLocation,
     u_atlas_cols: glow::UniformLocation,
     u_atlas_rows: glow::UniformLocation,
@@ -260,11 +263,13 @@ impl MinimapGl {
                 .unwrap();
             let u_objects = gl.get_uniform_location(program, "u_objects").unwrap();
             let u_lowpass = gl.get_uniform_location(program, "u_lowpass").unwrap();
+            let u_fog = gl.get_uniform_location(program, "u_fog").unwrap();
             gl.uniform_1_i32(Some(&u_grid), 0);
             gl.uniform_1_i32(Some(&u_atlas), 1);
             gl.uniform_1_i32(Some(&u_filtered_atlas), 2);
             gl.uniform_1_i32(Some(&u_objects), 3);
             gl.uniform_1_i32(Some(&u_lowpass), 4);
+            gl.uniform_1_i32(Some(&u_fog), 5);
             gl.use_program(None);
 
             // Fullscreen quad VBO
@@ -347,6 +352,7 @@ impl MinimapGl {
             // Object overlay texture: same dimensions as grid, filled via update_objects
             let objects_texture = create_r8_texture(gl);
             let lowpass_texture = create_mipmapped_rgba_texture(gl);
+            let fog_texture = create_r8_texture(gl);
 
             Self {
                 program,
@@ -357,6 +363,7 @@ impl MinimapGl {
                 grid_texture,
                 objects_texture,
                 lowpass_texture,
+                fog_texture,
                 u_grid_size,
                 u_atlas_cols,
                 u_atlas_rows,
@@ -381,6 +388,11 @@ impl MinimapGl {
     /// Upload the low-pass RGBA map used for zoomed-out rendering.
     pub fn update_lowpass(&self, gl: &glow::Context, lowpass_rgba: &[u8], width: u32, height: u32) {
         upload_rgba(gl, self.lowpass_texture, lowpass_rgba, width, height);
+    }
+
+    /// Upload the current fog-of-war visibility texture.
+    pub fn update_fog(&self, gl: &glow::Context, fog_visibility: &[u8], width: u32, height: u32) {
+        upload_r8(gl, self.fog_texture, fog_visibility, width, height);
     }
 
     /// Render the tilemap into the given viewport.
@@ -411,6 +423,8 @@ impl MinimapGl {
             gl.bind_texture(glow::TEXTURE_2D, Some(self.objects_texture));
             gl.active_texture(glow::TEXTURE4);
             gl.bind_texture(glow::TEXTURE_2D, Some(self.lowpass_texture));
+            gl.active_texture(glow::TEXTURE5);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.fog_texture));
 
             // Set uniforms
             gl.uniform_2_f32(Some(&self.u_grid_size), grid_size[0], grid_size[1]);
@@ -436,6 +450,8 @@ impl MinimapGl {
             gl.bind_vertex_array(None);
 
             // Clean up bindings
+            gl.active_texture(glow::TEXTURE5);
+            gl.bind_texture(glow::TEXTURE_2D, None);
             gl.active_texture(glow::TEXTURE4);
             gl.bind_texture(glow::TEXTURE_2D, None);
             gl.active_texture(glow::TEXTURE3);
@@ -462,6 +478,7 @@ impl MinimapGl {
             gl.delete_texture(self.grid_texture);
             gl.delete_texture(self.objects_texture);
             gl.delete_texture(self.lowpass_texture);
+            gl.delete_texture(self.fog_texture);
         }
     }
 }

@@ -3,6 +3,7 @@ pub mod audio_panel;
 pub mod connection_bar;
 pub mod inventory_panel;
 pub mod memory_watch_panel;
+pub mod minimap_fog;
 pub mod minimap_gl;
 pub mod minimap_panel;
 pub mod party_panel;
