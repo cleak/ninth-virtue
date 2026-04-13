@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -8,12 +9,17 @@ use egui::{Color32, FontId, Pos2, Rect, Stroke, StrokeKind, vec2};
 use crate::game::map::{CardinalDirection, LocationType, MapState, ObjectEntry, TileGridEncoding};
 use crate::game::offsets::{
     COMBAT_TERRAIN_HEIGHT, COMBAT_TERRAIN_LEN, COMBAT_TERRAIN_STRIDE, COMBAT_TERRAIN_WIDTH,
-    DUNGEON_LEVEL_HEIGHT, DUNGEON_LEVEL_LEN, DUNGEON_LEVEL_WIDTH,
+    DUNGEON_LEVEL_HEIGHT, DUNGEON_LEVEL_LEN, DUNGEON_LEVEL_WIDTH, VIEWPORT_VISIBILITY_HEIGHT,
+    VIEWPORT_VISIBILITY_WIDTH,
 };
 use crate::game::world_map::{WorldLabelCategory, WorldLocation, WorldMap};
 use crate::tiles::atlas::{TILE_COUNT, TILE_SIZE, TileAtlas};
 use crate::tiles::ega::is_ega_black_rgba;
 
+use super::minimap_fog::{
+    FOG_HIDDEN_TILE, FOG_VISIBILITY_EXPLORED, FOG_VISIBILITY_UNSEEN, FOG_VISIBILITY_VISIBLE,
+    FogScene, FogState,
+};
 use super::minimap_gl::MinimapGl;
 
 const ZOOM_MIN: usize = 11;
@@ -189,9 +195,11 @@ struct GridCacheKey {
 struct GpuState {
     renderer: Option<MinimapGl>,
     grid_dirty: bool,
+    fog_dirty: bool,
     grid_data: Vec<u8>,
     objects_data: Vec<u8>,
     lowpass_data: Vec<u8>,
+    fog_data: Vec<u8>,
     grid_dims: (u32, u32),
     player_tile: [f32; 2],
 }
@@ -208,6 +216,11 @@ pub struct MinimapState {
     last_grid_key: Option<GridCacheKey>,
     dungeon_primary_view: DungeonPrimaryView,
     show_dungeon_corner_view: bool,
+    fog: FogState,
+    fog_reset_confirm_open: bool,
+    fog_reset_confirm_text: String,
+    fog_reset_error: Option<String>,
+    fog_reset_target_game_key: Option<String>,
 }
 
 impl Default for MinimapState {
@@ -217,9 +230,11 @@ impl Default for MinimapState {
             gpu: Arc::new(Mutex::new(GpuState {
                 renderer: None,
                 grid_dirty: false,
+                fog_dirty: false,
                 grid_data: Vec::new(),
                 objects_data: Vec::new(),
                 lowpass_data: Vec::new(),
+                fog_data: Vec::new(),
                 grid_dims: (0, 0),
                 player_tile: [0.0, 0.0],
             })),
@@ -231,6 +246,11 @@ impl Default for MinimapState {
             last_grid_key: None,
             dungeon_primary_view: DungeonPrimaryView::default(),
             show_dungeon_corner_view: true,
+            fog: FogState::new(),
+            fog_reset_confirm_open: false,
+            fog_reset_confirm_text: String::new(),
+            fog_reset_error: None,
+            fog_reset_target_game_key: None,
         }
     }
 }
@@ -245,6 +265,7 @@ impl MinimapState {
     pub fn load_persistent_preferences(&mut self) {
         self.dungeon_primary_view = load_dungeon_primary_view();
         self.show_dungeon_corner_view = load_dungeon_corner_view();
+        self.fog.load_preferences();
     }
 
     /// Return the currently selected primary dungeon view mode.
@@ -269,19 +290,95 @@ impl MinimapState {
         save_dungeon_corner_view(visible);
     }
 
+    pub fn set_game_directory(&mut self, game_dir: Option<&Path>) {
+        if self.fog.set_game_dir(game_dir) {
+            self.cancel_fog_reset_confirmation();
+        }
+    }
+
+    pub fn fog_enabled(&self) -> bool {
+        self.fog.enabled()
+    }
+
+    pub fn set_fog_enabled(&mut self, enabled: bool) {
+        self.fog.set_enabled(enabled);
+    }
+
+    pub fn fog_supported_for_map(&self, map: &MapState) -> bool {
+        FogScene::from_map(map).is_some()
+    }
+
+    pub fn can_reset_fog(&self) -> bool {
+        self.fog.can_reset()
+    }
+
+    pub fn fog_persistence_error(&self) -> Option<&str> {
+        self.fog.persistence_error()
+    }
+
+    pub fn reset_fog(&mut self) -> std::io::Result<()> {
+        let Some(target_game_key) = self.fog_reset_target_game_key.as_deref() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "no fog reset target is selected",
+            ));
+        };
+        self.fog.reset_game_by_key(target_game_key)?;
+        self.fog_reset_error = None;
+        Ok(())
+    }
+
+    pub fn begin_fog_reset_confirmation(&mut self) {
+        self.fog_reset_confirm_open = true;
+        self.fog_reset_confirm_text.clear();
+        self.fog_reset_error = None;
+        self.fog_reset_target_game_key = self.fog.current_game_key().map(str::to_owned);
+    }
+
+    pub fn cancel_fog_reset_confirmation(&mut self) {
+        self.fog_reset_confirm_open = false;
+        self.fog_reset_confirm_text.clear();
+        self.fog_reset_error = None;
+        self.fog_reset_target_game_key = None;
+    }
+
+    pub fn fog_reset_confirmation_open(&self) -> bool {
+        self.fog_reset_confirm_open
+    }
+
+    pub fn fog_reset_confirmation_text(&mut self) -> &mut String {
+        &mut self.fog_reset_confirm_text
+    }
+
+    pub fn fog_reset_confirmation_ready(&self) -> bool {
+        self.fog_reset_confirm_text == "RESET"
+    }
+
+    pub fn fog_reset_error(&self) -> Option<&str> {
+        self.fog_reset_error.as_deref()
+    }
+
+    pub fn set_fog_reset_error(&mut self, error: impl Into<String>) {
+        self.fog_reset_error = Some(error.into());
+    }
+
     /// Clear cached map data so the next loaded snapshot forces a fresh upload.
     pub fn clear(&mut self) {
         self.map = None;
         self.raw_atlas = None;
         self.tile_lowpass_lut = None;
         self.last_grid_key = None;
+        self.cancel_fog_reset_confirmation();
+        self.fog_reset_error = None;
 
         let mut gpu = self.gpu.lock().unwrap();
         gpu.renderer = None;
         gpu.grid_dirty = false;
+        gpu.fog_dirty = false;
         gpu.grid_data.clear();
         gpu.objects_data.clear();
         gpu.lowpass_data.clear();
+        gpu.fog_data.clear();
         gpu.grid_dims = (0, 0);
         gpu.player_tile = [0.0, 0.0];
     }
@@ -346,7 +443,7 @@ pub fn show(
     let has_objects = !map.objects.is_empty();
     let needs_update = needs_grid_refresh(state.last_grid_key, grid_key, has_objects);
 
-    if needs_update {
+    let (grid_dims, player_tile, fog_data) = if needs_update {
         let (grid_data, grid_w, grid_h, player_tile) =
             if let Some(wm) = world_map.filter(|_| is_outdoor) {
                 let grid = extract_outdoor_grid(wm, cx, cy, zoom, map.z);
@@ -365,6 +462,7 @@ pub fn show(
             grid_w as usize,
             grid_h as usize,
         );
+        let fog_data = build_fog_texture(state, &map, grid_source, (grid_w, grid_h), zoom);
 
         let mut gpu = state.gpu.lock().unwrap();
         gpu.grid_data = grid_data;
@@ -373,9 +471,26 @@ pub fn show(
         gpu.grid_dims = (grid_w, grid_h);
         gpu.player_tile = player_tile;
         gpu.grid_dirty = true;
+        gpu.fog_data = fog_data.clone();
+        gpu.fog_dirty = true;
 
         state.last_grid_key = Some(grid_key);
-    }
+        ((grid_w, grid_h), player_tile, fog_data)
+    } else {
+        let (grid_dims, player_tile) = {
+            let gpu = state.gpu.lock().unwrap();
+            (gpu.grid_dims, gpu.player_tile)
+        };
+        let fog_data = build_fog_texture(state, &map, grid_source, grid_dims, zoom);
+
+        let mut gpu = state.gpu.lock().unwrap();
+        if gpu.fog_data != fog_data {
+            gpu.fog_data = fog_data.clone();
+            gpu.fog_dirty = true;
+        }
+
+        (grid_dims, player_tile, fog_data)
+    };
 
     // Allocate a centered square region for the minimap
     let avail = ui.available_size();
@@ -398,6 +513,7 @@ pub fn show(
                 gpu.renderer = Some(MinimapGl::new(gl, &raw_atlas));
                 // Force grid upload on first frame
                 gpu.grid_dirty = true;
+                gpu.fog_dirty = true;
             }
 
             // Upload grid and objects textures if dirty
@@ -407,6 +523,11 @@ pub fn show(
                 renderer.update_objects(gl, &gpu.objects_data, gpu.grid_dims.0, gpu.grid_dims.1);
                 renderer.update_lowpass(gl, &gpu.lowpass_data, gpu.grid_dims.0, gpu.grid_dims.1);
                 gpu.grid_dirty = false;
+            }
+            if gpu.fog_dirty {
+                let renderer = gpu.renderer.as_ref().unwrap();
+                renderer.update_fog(gl, &gpu.fog_data, gpu.grid_dims.0, gpu.grid_dims.1);
+                gpu.fog_dirty = false;
             }
 
             let grid_size = [gpu.grid_dims.0 as f32, gpu.grid_dims.1 as f32];
@@ -426,15 +547,18 @@ pub fn show(
                 show_labels: state.show_labels,
                 label_filters: state.label_filters,
             };
-            paint_overworld_overlay(ui, rect, wm, overlay);
+            paint_overworld_overlay(
+                ui,
+                rect,
+                wm,
+                overlay,
+                state.fog_enabled().then_some(fog_data.as_slice()),
+            );
         }
 
-        let (grid_dims, player_tile) = {
-            let gpu = state.gpu.lock().unwrap();
-            (gpu.grid_dims, gpu.player_tile)
-        };
         paint_player_marker(ui, rect, grid_dims, player_tile, None);
     });
+    show_fog_reset_confirmation(ui.ctx(), state);
 }
 
 /// Render the dungeon minimap without requiring a loaded tile atlas.
@@ -453,6 +577,7 @@ pub fn show_dungeon_without_atlas(ui: &mut egui::Ui, state: &mut MinimapState) {
 
     render_minimap_header(ui, state, &map, false);
     show_dungeon_map(ui, state, &map);
+    show_fog_reset_confirmation(ui.ctx(), state);
 }
 
 /// Render a placeholder when the tile atlas has not been loaded yet.
@@ -471,6 +596,7 @@ fn render_minimap_header(
     let is_dungeon = matches!(map.location, LocationType::Dungeon(_));
     let is_outdoor = map.is_outdoor();
     let is_underworld = map.is_underworld();
+    let fog_supported = state.fog_supported_for_map(map);
     let header = if is_outdoor || map.z == 0xFF {
         format!("{} ({}, {})", map.display_location_name(), map.x, map.y)
     } else {
@@ -520,6 +646,17 @@ fn render_minimap_header(
                     state.zoom = (state.zoom * 3 / 4).max(ZOOM_MIN);
                 }
                 ui.label(format!("{}x{}", state.zoom, state.zoom));
+                ui.separator();
+                if fog_supported {
+                    let mut fog_enabled = state.fog_enabled();
+                    if ui.checkbox(&mut fog_enabled, "Fog").changed() {
+                        state.set_fog_enabled(fog_enabled);
+                    }
+                }
+                let reset = ui.add_enabled(state.can_reset_fog(), egui::Button::new("Reset Fog…"));
+                if reset.clicked() {
+                    state.begin_fog_reset_confirmation();
+                }
             }
         });
 
@@ -536,7 +673,61 @@ fn render_minimap_header(
                 });
             });
         }
+
+        if let Some(error) = state.fog_persistence_error() {
+            ui.colored_label(
+                Color32::from_rgb(225, 109, 109),
+                format!("Fog save failed: {error}"),
+            );
+        }
     });
+}
+
+fn show_fog_reset_confirmation(ctx: &egui::Context, state: &mut MinimapState) {
+    if !state.fog_reset_confirmation_open() {
+        return;
+    }
+
+    let mut keep_open = true;
+    egui::Window::new("Confirm Fog Reset")
+        .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0))
+        .collapsible(false)
+        .resizable(false)
+        .default_width(360.0)
+        .open(&mut keep_open)
+        .show(ctx, |ui| {
+            ui.label("This will permanently clear all discovered fog data for the current Ultima V install.");
+            ui.label("Type `RESET` to enable the destructive action.");
+            if let Some(error) = state.fog_reset_error() {
+                ui.add_space(6.0);
+                ui.colored_label(
+                    Color32::from_rgb(225, 109, 109),
+                    format!("Reset failed: {error}"),
+                );
+            }
+            ui.add_space(6.0);
+            ui.text_edit_singleline(state.fog_reset_confirmation_text());
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() {
+                    state.cancel_fog_reset_confirmation();
+                }
+                let confirm = ui.add_enabled(
+                    state.fog_reset_confirmation_ready(),
+                    egui::Button::new("Reset Fog"),
+                );
+                if confirm.clicked() {
+                    match state.reset_fog() {
+                        Ok(()) => state.cancel_fog_reset_confirmation(),
+                        Err(err) => state.set_fog_reset_error(err.to_string()),
+                    }
+                }
+            });
+        });
+
+    if !keep_open {
+        state.cancel_fog_reset_confirmation();
+    }
 }
 
 /// Extract a zoom x zoom window from the active outdoor world centered on
@@ -627,6 +818,159 @@ fn local_scene_player_tile(map: &MapState) -> [f32; 2] {
             map.x.wrapping_sub(map.scroll_x) as f32,
             map.y.wrapping_sub(map.scroll_y) as f32,
         ],
+    }
+}
+
+fn build_fog_texture(
+    state: &mut MinimapState,
+    map: &MapState,
+    grid_source: GridSource,
+    grid_dims: (u32, u32),
+    zoom: usize,
+) -> Vec<u8> {
+    let grid_dims = (grid_dims.0 as usize, grid_dims.1 as usize);
+    let len = grid_dims.0 * grid_dims.1;
+    let Some(scene) = FogScene::from_map(map) else {
+        return vec![FOG_VISIBILITY_VISIBLE; len];
+    };
+
+    let fog_enabled = state.fog_enabled();
+    let projection = FogProjection::new(map, scene, grid_source, grid_dims, zoom);
+    let visible_scene_coords = projection.visible_scene_coords();
+    state.fog.record_visible_tiles(scene, &visible_scene_coords);
+    let explored = state.fog.scene_data(scene);
+    let mut fog = vec![FOG_VISIBILITY_UNSEEN; len];
+    let (scene_w, _) = scene.dimensions();
+
+    for gy in 0..grid_dims.1 {
+        for gx in 0..grid_dims.0 {
+            if let Some((scene_x, scene_y)) = projection.scene_coord_for_grid_cell(gx, gy)
+                && explored[scene_y * scene_w + scene_x] != 0
+            {
+                fog[gy * grid_dims.0 + gx] = FOG_VISIBILITY_EXPLORED;
+            }
+        }
+    }
+
+    for (scene_x, scene_y) in visible_scene_coords {
+        if let Some((grid_x, grid_y)) = projection.grid_cell_for_scene_coord(scene_x, scene_y) {
+            let idx = grid_y * grid_dims.0 + grid_x;
+            fog[idx] = FOG_VISIBILITY_VISIBLE;
+        }
+    }
+
+    if !fog_enabled {
+        fog.fill(FOG_VISIBILITY_VISIBLE);
+    }
+
+    fog
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FogProjection<'a> {
+    map: &'a MapState,
+    scene: FogScene,
+    grid_source: GridSource,
+    grid_dims: (usize, usize),
+    zoom: usize,
+}
+
+impl<'a> FogProjection<'a> {
+    fn new(
+        map: &'a MapState,
+        scene: FogScene,
+        grid_source: GridSource,
+        grid_dims: (usize, usize),
+        zoom: usize,
+    ) -> Self {
+        Self {
+            map,
+            scene,
+            grid_source,
+            grid_dims,
+            zoom,
+        }
+    }
+
+    fn visible_scene_coords(&self) -> Vec<(usize, usize)> {
+        let Some(tiles) = self.map.visibility_tiles.as_ref() else {
+            return Vec::new();
+        };
+
+        let mut coords = Vec::new();
+        let (scene_w, scene_h) = self.scene.dimensions();
+        let player_local = local_scene_player_tile(self.map);
+        let player_local_x = player_local[0].round() as i32;
+        let player_local_y = player_local[1].round() as i32;
+
+        for vy in 0..VIEWPORT_VISIBILITY_HEIGHT {
+            for vx in 0..VIEWPORT_VISIBILITY_WIDTH {
+                let idx = vy * VIEWPORT_VISIBILITY_WIDTH + vx;
+                if tiles[idx] == FOG_HIDDEN_TILE {
+                    continue;
+                }
+
+                let dx = vx as i32 - VIEWPORT_VISIBILITY_WIDTH as i32 / 2;
+                let dy = vy as i32 - VIEWPORT_VISIBILITY_HEIGHT as i32 / 2;
+
+                match self.scene {
+                    FogScene::Britannia | FogScene::Underworld => coords.push((
+                        self.map.x.wrapping_add_signed(dx as i8) as usize,
+                        self.map.y.wrapping_add_signed(dy as i8) as usize,
+                    )),
+                    FogScene::Local(_) => {
+                        let x = player_local_x + dx;
+                        let y = player_local_y + dy;
+                        if (0..scene_w as i32).contains(&x) && (0..scene_h as i32).contains(&y) {
+                            coords.push((x as usize, y as usize));
+                        }
+                    }
+                }
+            }
+        }
+
+        coords
+    }
+
+    fn scene_coord_for_grid_cell(&self, grid_x: usize, grid_y: usize) -> Option<(usize, usize)> {
+        match self.scene {
+            FogScene::Britannia | FogScene::Underworld => match self.grid_source {
+                GridSource::Outdoor => {
+                    let half = self.zoom as i32 / 2;
+                    Some((
+                        (self.map.x as i32 - half + grid_x as i32).rem_euclid(256) as usize,
+                        (self.map.y as i32 - half + grid_y as i32).rem_euclid(256) as usize,
+                    ))
+                }
+                GridSource::Local => Some((
+                    self.map.scroll_x.wrapping_add(grid_x as u8) as usize,
+                    self.map.scroll_y.wrapping_add(grid_y as u8) as usize,
+                )),
+            },
+            FogScene::Local(_) => Some((grid_x, grid_y)),
+        }
+    }
+
+    fn grid_cell_for_scene_coord(&self, scene_x: usize, scene_y: usize) -> Option<(usize, usize)> {
+        match self.scene {
+            FogScene::Britannia | FogScene::Underworld => {
+                let (top_left_x, top_left_y) = match self.grid_source {
+                    GridSource::Outdoor => {
+                        let half = self.zoom as i32 / 2;
+                        (
+                            (self.map.x as i32 - half).rem_euclid(256) as usize,
+                            (self.map.y as i32 - half).rem_euclid(256) as usize,
+                        )
+                    }
+                    GridSource::Local => (self.map.scroll_x as usize, self.map.scroll_y as usize),
+                };
+                let grid_x = (scene_x + 256 - top_left_x) % 256;
+                let grid_y = (scene_y + 256 - top_left_y) % 256;
+                (grid_x < self.grid_dims.0 && grid_y < self.grid_dims.1).then_some((grid_x, grid_y))
+            }
+            FogScene::Local(_) => (scene_x < self.grid_dims.0 && scene_y < self.grid_dims.1)
+                .then_some((scene_x, scene_y)),
+        }
     }
 }
 
@@ -1346,6 +1690,7 @@ fn paint_overworld_overlay(
     rect: Rect,
     world_map: &WorldMap,
     overlay: OverworldOverlayOptions,
+    fog_visibility: Option<&[u8]>,
 ) {
     let mut visible = visible_world_locations(
         world_map.locations(),
@@ -1368,6 +1713,9 @@ fn paint_overworld_overlay(
 
     let painter = ui.painter_at(rect);
     for entry in &visible {
+        if !is_overworld_location_revealed(entry.location, overlay, fog_visibility) {
+            continue;
+        }
         let fill = world_marker_color(entry.location.category());
         painter.circle_filled(entry.point, 3.5, fill);
         painter.circle_stroke(entry.point, 4.5, Stroke::new(1.0, Color32::BLACK));
@@ -1386,6 +1734,9 @@ fn paint_overworld_overlay(
     let mut occupied = Vec::new();
 
     for entry in &visible {
+        if !is_overworld_location_revealed(entry.location, overlay, fog_visibility) {
+            continue;
+        }
         if !overlay.label_filters.shows(entry.location.category()) {
             continue;
         }
@@ -1407,6 +1758,25 @@ fn paint_overworld_overlay(
         painter.galley(label_rect.min, galley, Color32::WHITE);
         occupied.push(label_rect.expand2(vec2(6.0, 4.0)));
     }
+}
+
+fn is_overworld_location_revealed(
+    location: &WorldLocation,
+    overlay: OverworldOverlayOptions,
+    fog_visibility: Option<&[u8]>,
+) -> bool {
+    let Some(fog_visibility) = fog_visibility else {
+        return true;
+    };
+    let half = overlay.zoom as i32 / 2;
+    let top_left_x = (overlay.cx as i32 - half).rem_euclid(256) as usize;
+    let top_left_y = (overlay.cy as i32 - half).rem_euclid(256) as usize;
+    let grid_x = (location.x as usize + 256 - top_left_x) % 256;
+    let grid_y = (location.y as usize + 256 - top_left_y) % 256;
+    if grid_x >= overlay.zoom || grid_y >= overlay.zoom {
+        return false;
+    }
+    fog_visibility[grid_y * overlay.zoom + grid_x] != FOG_VISIBILITY_UNSEEN
 }
 
 /// Paint the current player location with a screen-space marker that keeps a
@@ -1630,6 +2000,7 @@ fn world_marker_color(category: WorldLabelCategory) -> Color32 {
 mod tests {
     use super::*;
     use crate::game::map::LocationType;
+    use crate::game::offsets::VIEWPORT_VISIBILITY_LEN;
     use crate::game::quest::Virtue;
     use crate::game::world_map::{WorldLabelKind, WorldLocation};
 
@@ -1829,6 +2200,7 @@ mod tests {
             scroll_y: 0,
             tiles: [0; 1024],
             combat_tiles: None,
+            visibility_tiles: None,
             objects: Vec::new(),
         });
         state.last_grid_key = Some(GridCacheKey {
@@ -1839,13 +2211,17 @@ mod tests {
             outdoor_z: Some(0xFF),
         });
         state.raw_atlas = Some(Arc::new(vec![1, 2, 3]));
+        state.fog_reset_error = Some("disk error".to_string());
+        state.fog_reset_target_game_key = Some("game-key".to_string());
 
         {
             let mut gpu = state.gpu.lock().unwrap();
             gpu.grid_dirty = true;
+            gpu.fog_dirty = true;
             gpu.grid_data = vec![1];
             gpu.objects_data = vec![2];
             gpu.lowpass_data = vec![3, 4, 5, 255];
+            gpu.fog_data = vec![255; 12];
             gpu.grid_dims = (3, 4);
             gpu.player_tile = [5.0, 6.0];
         }
@@ -1855,14 +2231,18 @@ mod tests {
         assert!(state.map.is_none());
         assert!(state.raw_atlas.is_none());
         assert!(state.last_grid_key.is_none());
+        assert!(state.fog_reset_error().is_none());
+        assert!(state.fog_reset_target_game_key.is_none());
 
         let gpu = state.gpu.lock().unwrap();
         // clear() must drop the GL-backed renderer so the next paint callback rebuilds it.
         assert!(gpu.renderer.is_none());
         assert!(!gpu.grid_dirty);
+        assert!(!gpu.fog_dirty);
         assert!(gpu.grid_data.is_empty());
         assert!(gpu.objects_data.is_empty());
         assert!(gpu.lowpass_data.is_empty());
+        assert!(gpu.fog_data.is_empty());
         assert_eq!(gpu.grid_dims, (0, 0));
         assert_eq!(gpu.player_tile, [0.0, 0.0]);
     }
@@ -1999,6 +2379,7 @@ mod tests {
             scroll_y: 0,
             tiles: [0; 1024],
             combat_tiles: None,
+            visibility_tiles: None,
             objects: Vec::new(),
         };
         let objects = vec![
@@ -2034,6 +2415,7 @@ mod tests {
             scroll_y: 48,
             tiles: [0; 1024],
             combat_tiles: None,
+            visibility_tiles: None,
             objects: Vec::new(),
         };
         let objects = vec![ObjectEntry {
@@ -2118,6 +2500,125 @@ mod tests {
         assert_eq!(parse_bool_pref("true"), Some(true));
         assert_eq!(parse_bool_pref(" false "), Some(false));
         assert_eq!(parse_bool_pref("maybe"), None);
+    }
+
+    #[test]
+    fn fog_reset_confirmation_requires_exact_reset_token() {
+        let mut state = MinimapState::new();
+        state.set_game_directory(Some(Path::new(r"C:\Games\Ultima 5")));
+        state.begin_fog_reset_confirmation();
+        assert!(state.fog_reset_confirmation_open());
+        assert!(!state.fog_reset_confirmation_ready());
+        assert_eq!(
+            state.fog_reset_target_game_key.as_deref(),
+            state.fog.current_game_key()
+        );
+
+        *state.fog_reset_confirmation_text() = "reset".to_string();
+        assert!(!state.fog_reset_confirmation_ready());
+
+        *state.fog_reset_confirmation_text() = " RESET ".to_string();
+        assert!(!state.fog_reset_confirmation_ready());
+
+        *state.fog_reset_confirmation_text() = "RESET".to_string();
+        assert!(state.fog_reset_confirmation_ready());
+
+        state.cancel_fog_reset_confirmation();
+        assert!(!state.fog_reset_confirmation_open());
+        assert!(state.fog_reset_confirmation_text().is_empty());
+        assert!(state.fog_reset_target_game_key.is_none());
+    }
+
+    #[test]
+    fn changing_game_directory_cancels_fog_reset_confirmation() {
+        let mut state = MinimapState::new();
+        state.set_game_directory(Some(Path::new(r"C:\Games\Ultima 5")));
+        state.begin_fog_reset_confirmation();
+        *state.fog_reset_confirmation_text() = "RESET".to_string();
+
+        state.set_game_directory(Some(Path::new(r"C:\Games\Ultima 5 Test")));
+
+        assert!(!state.fog_reset_confirmation_open());
+        assert!(state.fog_reset_confirmation_text().is_empty());
+        assert!(state.fog_reset_target_game_key.is_none());
+    }
+
+    #[test]
+    fn fog_supported_for_map_excludes_combat() {
+        let state = MinimapState::new();
+        let overworld = MapState {
+            location: LocationType::Overworld,
+            z: 0,
+            x: 0,
+            y: 0,
+            dungeon_facing: None,
+            transport: 0,
+            scroll_x: 0,
+            scroll_y: 0,
+            tiles: [0; 1024],
+            combat_tiles: None,
+            visibility_tiles: None,
+            objects: Vec::new(),
+        };
+        let combat = MapState {
+            location: LocationType::Combat(0x80),
+            ..overworld.clone()
+        };
+
+        assert!(state.fog_supported_for_map(&overworld));
+        assert!(!state.fog_supported_for_map(&combat));
+    }
+
+    #[test]
+    fn fog_projection_wraps_outdoor_scene_coordinates_from_world_view() {
+        let map = MapState {
+            location: LocationType::Overworld,
+            z: 0,
+            x: 2,
+            y: 250,
+            dungeon_facing: None,
+            transport: 0,
+            scroll_x: 0,
+            scroll_y: 0,
+            tiles: [0; 1024],
+            combat_tiles: None,
+            visibility_tiles: None,
+            objects: Vec::new(),
+        };
+        let projection =
+            FogProjection::new(&map, FogScene::Britannia, GridSource::Outdoor, (16, 16), 16);
+
+        assert_eq!(projection.scene_coord_for_grid_cell(0, 0), Some((250, 242)));
+        assert_eq!(projection.grid_cell_for_scene_coord(2, 250), Some((8, 8)));
+        assert_eq!(projection.grid_cell_for_scene_coord(1, 249), Some((7, 7)));
+    }
+
+    #[test]
+    fn fog_projection_clamps_local_visibility_to_scene_bounds() {
+        let mut visibility = [FOG_HIDDEN_TILE; VIEWPORT_VISIBILITY_LEN];
+        let center = (VIEWPORT_VISIBILITY_HEIGHT / 2) * VIEWPORT_VISIBILITY_WIDTH
+            + VIEWPORT_VISIBILITY_WIDTH / 2;
+        visibility[center] = 0x01;
+        visibility[0] = 0x01;
+
+        let map = MapState {
+            location: LocationType::Town(2),
+            z: 0,
+            x: 0,
+            y: 0,
+            dungeon_facing: None,
+            transport: 0,
+            scroll_x: 0,
+            scroll_y: 0,
+            tiles: [0; 1024],
+            combat_tiles: None,
+            visibility_tiles: Some(visibility),
+            objects: Vec::new(),
+        };
+        let projection =
+            FogProjection::new(&map, FogScene::Local(2), GridSource::Local, (32, 32), 32);
+
+        assert_eq!(projection.visible_scene_coords(), vec![(0, 0)]);
     }
 
     #[test]
@@ -2228,6 +2729,7 @@ mod tests {
             scroll_y: 48,
             tiles: [0; 1024],
             combat_tiles: Some(combat_tiles),
+            visibility_tiles: None,
             objects: Vec::new(),
         };
 
@@ -2252,6 +2754,7 @@ mod tests {
             scroll_y: 48,
             tiles,
             combat_tiles: None,
+            visibility_tiles: None,
             objects: Vec::new(),
         };
 

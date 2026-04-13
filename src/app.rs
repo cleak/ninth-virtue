@@ -255,6 +255,8 @@ impl UltimaCompanion {
         self.tile_atlas_error = None;
         match config::find_game_directory(handle) {
             Ok(dir) => {
+                self.minimap.set_game_directory(Some(&dir));
+                self.game_dir = Some(dir.clone());
                 match TileAtlas::load(&dir) {
                     Ok(atlas) => {
                         self.tile_atlas = Some(atlas);
@@ -274,9 +276,9 @@ impl UltimaCompanion {
                         self.tile_atlas_error = Some(load_error);
                     }
                 }
-                self.game_dir = Some(dir);
             }
             Err(e) => {
+                self.minimap.set_game_directory(None);
                 let game_dir_error = format!("Game dir not found: {e}");
                 self.status_msg = game_dir_error.clone();
                 self.tile_atlas_error = Some(game_dir_error);
@@ -314,6 +316,7 @@ impl UltimaCompanion {
         self.shrine_quest = ShrineQuest::default();
         self.frigates.clear();
         self.minimap.clear();
+        self.minimap.set_game_directory(None);
         self.game_dir = None;
         self.tile_atlas = None;
         self.tile_atlas_error = None;
