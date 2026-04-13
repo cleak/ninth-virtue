@@ -188,11 +188,10 @@ fn print_usage() {
 }
 
 fn default_label() -> String {
-    let secs = SystemTime::now()
+    let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format!("snapshot-{secs}")
+        .unwrap_or_default();
+    format!("snapshot-{}-{:09}", now.as_secs(), now.subsec_nanos())
 }
 
 fn select_process(requested_pid: Option<u32>) -> Result<(u32, String)> {

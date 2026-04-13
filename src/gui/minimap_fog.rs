@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::game::map::{LocationType, MapState};
@@ -92,11 +93,12 @@ impl FogState {
         self.game_key.is_some()
     }
 
-    pub fn reset_current_game(&mut self) {
+    pub fn reset_current_game(&mut self) -> io::Result<()> {
         if let Some(path) = self.current_game_dir_path() {
-            let _ = fs::remove_dir_all(path);
+            remove_fog_root(&path)?;
         }
         self.scenes.clear();
+        Ok(())
     }
 
     pub fn record_visible_tiles(&mut self, scene: FogScene, coords: &[(usize, usize)]) {
@@ -210,6 +212,14 @@ fn appdata_root() -> Option<PathBuf> {
     Some(path)
 }
 
+fn remove_fog_root(path: &Path) -> io::Result<()> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
 fn game_dir_storage_key(path: &Path) -> String {
     let normalized = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let normalized = normalized
@@ -229,6 +239,7 @@ fn game_dir_storage_key(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn fog_scene_dimensions_match_runtime_maps() {
@@ -242,5 +253,20 @@ mod tests {
         let a = game_dir_storage_key(Path::new(r"C:\Games\Ultima 5"));
         let b = game_dir_storage_key(Path::new("c:/games/ultima 5"));
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn remove_fog_root_propagates_non_directory_errors() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("ninth-virtue-fog-reset-{unique}.tmp"));
+        fs::write(&path, b"not a directory").unwrap();
+
+        let err = remove_fog_root(&path).expect_err("removing a file as a directory should fail");
+        assert_ne!(err.kind(), io::ErrorKind::NotFound);
+
+        fs::remove_file(path).unwrap();
     }
 }

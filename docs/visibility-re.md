@@ -18,38 +18,38 @@ to regenerate the manifest for the active install. The current static pass was
 grounded against this local Windows GOG install:
 
 - `C:\Program Files (x86)\GOG Galaxy\Games\Ultima 5`
-- Generated: `2026-04-12T14:41:58.3486971-07:00`
+- Generated: `2026-04-12T20:35:30.1171346-07:00`
 
-| File | SHA-256 |
-|---|---|
-| `BLCKTHRN.OVL` | `e2f8455c5b1391878f6b7c8ff6574413c8b65267a440614f66f33b34482abc39` |
-| `CAST.OVL` | `6dce8ffa4262c797ecca717ac0aaa73dd19376c51427073e7e62e407166b6c4a` |
-| `CAST2.OVL` | `7ececd3fb12211f3a90bf732c88b10f078a406099431fa24257f24d408659425` |
-| `CMDS.OVL` | `56dccb08f88957383f3dbb6765e5e86049ac6b765cef3e18a3b1da209234a258` |
-| `COMBAT.OVL` | `e73d5cd382174a449c56786d1596cebd4d4d9b376d0df2b8d8109faf5a9e9619` |
-| `COMSUBS.OVL` | `cef80d156663da4394a573aaa181cfd7f96cfbfa4d378fea6e15e2ca31d8145e` |
-| `ULTIMA.EXE` | `e904215f43f45080b499a6de683dddce6f3b0466f25bdce067388ea50a7ac5b0` |
-| `DATA.OVL` | `da7d10decb8864754d13910e8694c0cb7301b5224f25156730857827f07168c3` |
-| `DNGLOOK.OVL` | `869ae321f1f1e020bdffbad346cac7bf0a5fbdf697202ae7af47c659e3c7161c` |
-| `DUNGEON.OVL` | `4624c97694038bc36ec81cc0e186c837cf484258ecf806dcb06c2e1d0c408518` |
-| `ENDGAME.OVL` | `409771c71994e6e2ce7850cb10fcab3d6e9b1ad5ff98e517b397795624f9f424` |
-| `FLAMES.OVL` | `e3b075c5cba18cacab558e2e5e261a7c20f531dfde2d0f2ab352f9e4239c11d4` |
-| `FONT.OVL` | `4dc05e8d75181246151e398b32f9c786897d828fa3cd229809dbc5dcea21d74d` |
-| `INTRO.OVL` | `074543b5b1d0bca1c4487a677c4aaf5557a28c344caf09da51636d2365923356` |
-| `LOOKOBJ.OVL` | `91eb595670f8a94a91b43e9912a5755cdc40aac991231d29425c6eedd1eacd57` |
-| `MAINOUT.OVL` | `522b995016365b5528c3af1400e185d0d062cdd94b1e23d25b0d8fdea4a7c54c` |
-| `NPC.OVL` | `f1491fb52f685183baf0f5176845105e82e2f31109e7f1f3b7587f98b295151d` |
-| `OUTSUBS.OVL` | `2e8db7d79e81221b8cdb90bb78692913e0906aebb1605ff43cb5b8fade23e184` |
-| `SHOPPES.OVL` | `82ea4d043f84b112f5065978818446942a6538377eab89442e3fc8d5a85b270f` |
-| `SHOPPES2.OVL` | `bea9c2bf72433f86401beb75ec9c47215bb0a7259790a41329fbf18b16468f7f` |
-| `SHOPPES3.OVL` | `b1e46f145cde60361acc712f1bd368c96db0c60019d39658f59c94f1aaed68f4` |
-| `SJOG.OVL` | `ab16475d5971e41b422187a0e5214c3ce9249de19dc84852e6d11e378717b299` |
-| `TALK.OVL` | `fa0abe9ace2e6761a93e28e179b8acd3b73ec2661ca05b552f53988ee32ad60d` |
-| `TOWN.OVL` | `0deb3ef891e538cd3a53700e43ede2cda6372e4298fbff11ca8310ad2acce062` |
-| `ZSTATS.OVL` | `6d8c3913249d03b1f77a53e0cb663a2d650c7748f7163628c8a6809fde459933` |
-| `dosboxULTIMA5.conf` | `0c67f27939f80b87d55022551f1ccb7d244dbf1abb53f3bec5875ceb0ac2de02` |
-| `dosboxULTIMA5_single.conf` | `208e12098eb488c5c26582c8538668e0ea75daa69438755267c46b81c44a90fd` |
-| `dosboxULTIMA5_single_no_game.conf` | `abee497e7b80231eea4258b80006ce31b076ce68b4d72477a63a80a426cb2c5c` |
+| File | Size | SHA-256 |
+|---|---:|---|
+| `BLCKTHRN.OVL` | 3184 | `e2f8455c5b1391878f6b7c8ff6574413c8b65267a440614f66f33b34482abc39` |
+| `CAST.OVL` | 8560 | `6dce8ffa4262c797ecca717ac0aaa73dd19376c51427073e7e62e407166b6c4a` |
+| `CAST2.OVL` | 4544 | `7ececd3fb12211f3a90bf732c88b10f078a406099431fa24257f24d408659425` |
+| `CMDS.OVL` | 7440 | `56dccb08f88957383f3dbb6765e5e86049ac6b765cef3e18a3b1da209234a258` |
+| `COMBAT.OVL` | 7408 | `e73d5cd382174a449c56786d1596cebd4d4d9b376d0df2b8d8109faf5a9e9619` |
+| `COMSUBS.OVL` | 5216 | `cef80d156663da4394a573aaa181cfd7f96cfbfa4d378fea6e15e2ca31d8145e` |
+| `DATA.OVL` | 48464 | `da7d10decb8864754d13910e8694c0cb7301b5224f25156730857827f07168c3` |
+| `DNGLOOK.OVL` | 5040 | `869ae321f1f1e020bdffbad346cac7bf0a5fbdf697202ae7af47c659e3c7161c` |
+| `dosboxULTIMA5.conf` | 11218 | `0c67f27939f80b87d55022551f1ccb7d244dbf1abb53f3bec5875ceb0ac2de02` |
+| `dosboxULTIMA5_single.conf` | 270 | `208e12098eb488c5c26582c8538668e0ea75daa69438755267c46b81c44a90fd` |
+| `dosboxULTIMA5_single_no_game.conf` | 307 | `abee497e7b80231eea4258b80006ce31b076ce68b4d72477a63a80a426cb2c5c` |
+| `DUNGEON.OVL` | 8016 | `4624c97694038bc36ec81cc0e186c837cf484258ecf806dcb06c2e1d0c408518` |
+| `ENDGAME.OVL` | 2864 | `409771c71994e6e2ce7850cb10fcab3d6e9b1ad5ff98e517b397795624f9f424` |
+| `FLAMES.OVL` | 32 | `e3b075c5cba18cacab558e2e5e261a7c20f531dfde2d0f2ab352f9e4239c11d4` |
+| `FONT.OVL` | 3744 | `4dc05e8d75181246151e398b32f9c786897d828fa3cd229809dbc5dcea21d74d` |
+| `INTRO.OVL` | 8400 | `074543b5b1d0bca1c4487a677c4aaf5557a28c344caf09da51636d2365923356` |
+| `LOOKOBJ.OVL` | 4560 | `91eb595670f8a94a91b43e9912a5755cdc40aac991231d29425c6eedd1eacd57` |
+| `MAINOUT.OVL` | 7344 | `522b995016365b5528c3af1400e185d0d062cdd94b1e23d25b0d8fdea4a7c54c` |
+| `NPC.OVL` | 4912 | `f1491fb52f685183baf0f5176845105e82e2f31109e7f1f3b7587f98b295151d` |
+| `OUTSUBS.OVL` | 2464 | `2e8db7d79e81221b8cdb90bb78692913e0906aebb1605ff43cb5b8fade23e184` |
+| `SHOPPES.OVL` | 5936 | `82ea4d043f84b112f5065978818446942a6538377eab89442e3fc8d5a85b270f` |
+| `SHOPPES2.OVL` | 2848 | `bea9c2bf72433f86401beb75ec9c47215bb0a7259790a41329fbf18b16468f7f` |
+| `SHOPPES3.OVL` | 2528 | `b1e46f145cde60361acc712f1bd368c96db0c60019d39658f59c94f1aaed68f4` |
+| `SJOG.OVL` | 8800 | `ab16475d5971e41b422187a0e5214c3ce9249de19dc84852e6d11e378717b299` |
+| `TALK.OVL` | 4880 | `fa0abe9ace2e6761a93e28e179b8acd3b73ec2661ca05b552f53988ee32ad60d` |
+| `TOWN.OVL` | 6256 | `0deb3ef891e538cd3a53700e43ede2cda6372e4298fbff11ca8310ad2acce062` |
+| `ULTIMA.EXE` | 36592 | `e904215f43f45080b499a6de683dddce6f3b0466f25bdce067388ea50a7ac5b0` |
+| `ZSTATS.OVL` | 4880 | `6d8c3913249d03b1f77a53e0cb663a2d650c7748f7163628c8a6809fde459933` |
 
 ## Validation Matrix
 
@@ -245,8 +245,8 @@ High-confidence conclusion:
 
 When DOSBox is running, use this flow:
 
-1. Freeze the active binary set with `scripts/freeze-visibility-artifacts.ps1`.
-2. Capture a baseline snapshot with `cargo run --bin visibility_watch -- --label baseline`.
+1. Freeze the active binary set with `.\scripts\freeze-visibility-artifacts.ps1 -GameDir '<path-to-ultima5>'`.
+2. Capture a baseline snapshot with `& cargo run --bin visibility_watch -- --label baseline`.
 3. Perform exactly one in-game action.
 4. Capture `during` and `settled` snapshots.
 5. Diff:

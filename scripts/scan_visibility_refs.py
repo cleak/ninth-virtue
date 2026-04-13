@@ -39,9 +39,20 @@ INTERESTING_ADDRS = {
 
 
 def parse_args() -> argparse.Namespace:
+    def non_negative_int(value: str) -> int:
+        parsed = int(value)
+        if parsed < 0:
+            raise argparse.ArgumentTypeError("--context must be >= 0")
+        return parsed
+
     parser = argparse.ArgumentParser()
     parser.add_argument("targets", nargs="+", help="Game directory or one or more files to scan")
-    parser.add_argument("--context", type=int, default=12, help="Instruction context on each side")
+    parser.add_argument(
+        "--context",
+        type=non_negative_int,
+        default=12,
+        help="Instruction context on each side",
+    )
     parser.add_argument(
         "--files",
         nargs="*",
@@ -103,7 +114,7 @@ def find_hits(path: Path, context: int) -> list[str]:
     if not hits:
         return rendered
 
-    rendered.append(f"FILE {path.name}")
+    rendered.append(f"FILE {path.as_posix()}")
     seen_contexts: set[int] = set()
     for address, matched in hits:
         idx = by_index[address]

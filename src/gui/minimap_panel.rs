@@ -219,6 +219,7 @@ pub struct MinimapState {
     fog: FogState,
     fog_reset_confirm_open: bool,
     fog_reset_confirm_text: String,
+    fog_reset_error: Option<String>,
 }
 
 impl Default for MinimapState {
@@ -247,6 +248,7 @@ impl Default for MinimapState {
             fog: FogState::new(),
             fog_reset_confirm_open: false,
             fog_reset_confirm_text: String::new(),
+            fog_reset_error: None,
         }
     }
 }
@@ -298,22 +300,30 @@ impl MinimapState {
         self.fog.set_enabled(enabled);
     }
 
+    pub fn fog_supported_for_map(&self, map: &MapState) -> bool {
+        FogScene::from_map(map).is_some()
+    }
+
     pub fn can_reset_fog(&self) -> bool {
         self.fog.can_reset()
     }
 
-    pub fn reset_fog(&mut self) {
-        self.fog.reset_current_game();
+    pub fn reset_fog(&mut self) -> std::io::Result<()> {
+        self.fog.reset_current_game()?;
+        self.fog_reset_error = None;
+        Ok(())
     }
 
     pub fn begin_fog_reset_confirmation(&mut self) {
         self.fog_reset_confirm_open = true;
         self.fog_reset_confirm_text.clear();
+        self.fog_reset_error = None;
     }
 
     pub fn cancel_fog_reset_confirmation(&mut self) {
         self.fog_reset_confirm_open = false;
         self.fog_reset_confirm_text.clear();
+        self.fog_reset_error = None;
     }
 
     pub fn fog_reset_confirmation_open(&self) -> bool {
@@ -328,6 +338,14 @@ impl MinimapState {
         self.fog_reset_confirm_text == "RESET"
     }
 
+    pub fn fog_reset_error(&self) -> Option<&str> {
+        self.fog_reset_error.as_deref()
+    }
+
+    pub fn set_fog_reset_error(&mut self, error: impl Into<String>) {
+        self.fog_reset_error = Some(error.into());
+    }
+
     /// Clear cached map data so the next loaded snapshot forces a fresh upload.
     pub fn clear(&mut self) {
         self.map = None;
@@ -335,6 +353,7 @@ impl MinimapState {
         self.tile_lowpass_lut = None;
         self.last_grid_key = None;
         self.cancel_fog_reset_confirmation();
+        self.fog_reset_error = None;
 
         let mut gpu = self.gpu.lock().unwrap();
         gpu.renderer = None;
@@ -561,6 +580,7 @@ fn render_minimap_header(
     let is_dungeon = matches!(map.location, LocationType::Dungeon(_));
     let is_outdoor = map.is_outdoor();
     let is_underworld = map.is_underworld();
+    let fog_supported = state.fog_supported_for_map(map);
     let header = if is_outdoor || map.z == 0xFF {
         format!("{} ({}, {})", map.display_location_name(), map.x, map.y)
     } else {
@@ -611,9 +631,11 @@ fn render_minimap_header(
                 }
                 ui.label(format!("{}x{}", state.zoom, state.zoom));
                 ui.separator();
-                let mut fog_enabled = state.fog_enabled();
-                if ui.checkbox(&mut fog_enabled, "Fog").changed() {
-                    state.set_fog_enabled(fog_enabled);
+                if fog_supported {
+                    let mut fog_enabled = state.fog_enabled();
+                    if ui.checkbox(&mut fog_enabled, "Fog").changed() {
+                        state.set_fog_enabled(fog_enabled);
+                    }
                 }
                 let reset = ui.add_enabled(state.can_reset_fog(), egui::Button::new("Reset Fog…"));
                 if reset.clicked() {
@@ -653,6 +675,13 @@ fn show_fog_reset_confirmation(ctx: &egui::Context, state: &mut MinimapState) {
         .show(ctx, |ui| {
             ui.label("This will permanently clear all discovered fog data for the current Ultima V install.");
             ui.label("Type `RESET` to enable the destructive action.");
+            if let Some(error) = state.fog_reset_error() {
+                ui.add_space(6.0);
+                ui.colored_label(
+                    Color32::from_rgb(225, 109, 109),
+                    format!("Reset failed: {error}"),
+                );
+            }
             ui.add_space(6.0);
             ui.text_edit_singleline(state.fog_reset_confirmation_text());
             ui.add_space(8.0);
@@ -665,8 +694,10 @@ fn show_fog_reset_confirmation(ctx: &egui::Context, state: &mut MinimapState) {
                     egui::Button::new("Reset Fog"),
                 );
                 if confirm.clicked() {
-                    state.reset_fog();
-                    state.cancel_fog_reset_confirmation();
+                    match state.reset_fog() {
+                        Ok(()) => state.cancel_fog_reset_confirmation(),
+                        Err(err) => state.set_fog_reset_error(err.to_string()),
+                    }
                 }
             });
         });
@@ -2157,6 +2188,7 @@ mod tests {
             outdoor_z: Some(0xFF),
         });
         state.raw_atlas = Some(Arc::new(vec![1, 2, 3]));
+        state.fog_reset_error = Some("disk error".to_string());
 
         {
             let mut gpu = state.gpu.lock().unwrap();
@@ -2175,6 +2207,7 @@ mod tests {
         assert!(state.map.is_none());
         assert!(state.raw_atlas.is_none());
         assert!(state.last_grid_key.is_none());
+        assert!(state.fog_reset_error().is_none());
 
         let gpu = state.gpu.lock().unwrap();
         // clear() must drop the GL-backed renderer so the next paint callback rebuilds it.
@@ -2463,6 +2496,32 @@ mod tests {
         state.cancel_fog_reset_confirmation();
         assert!(!state.fog_reset_confirmation_open());
         assert!(state.fog_reset_confirmation_text().is_empty());
+    }
+
+    #[test]
+    fn fog_supported_for_map_excludes_combat() {
+        let state = MinimapState::new();
+        let overworld = MapState {
+            location: LocationType::Overworld,
+            z: 0,
+            x: 0,
+            y: 0,
+            dungeon_facing: None,
+            transport: 0,
+            scroll_x: 0,
+            scroll_y: 0,
+            tiles: [0; 1024],
+            combat_tiles: None,
+            visibility_tiles: None,
+            objects: Vec::new(),
+        };
+        let combat = MapState {
+            location: LocationType::Combat(0x80),
+            ..overworld.clone()
+        };
+
+        assert!(state.fog_supported_for_map(&overworld));
+        assert!(!state.fog_supported_for_map(&combat));
     }
 
     #[test]

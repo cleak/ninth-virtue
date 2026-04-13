@@ -414,6 +414,20 @@ mod tests {
         }
         // Place water at top-left
         mock.write_u8(tile_addr, 0x01).unwrap();
+        for row in 0..VIEWPORT_VISIBILITY_HEIGHT {
+            for col in 0..VIEWPORT_VISIBILITY_STRIDE {
+                let value = if col < VIEWPORT_VISIBILITY_WIDTH {
+                    ((row as u8) << 4) | col as u8
+                } else {
+                    0xEE
+                };
+                mock.write_u8(
+                    ds_addr(0, VIEWPORT_VISIBILITY_GRID) + row * VIEWPORT_VISIBILITY_STRIDE + col,
+                    value,
+                )
+                .unwrap();
+            }
+        }
 
         let state = read_map_state(&mock, 0).unwrap();
         assert_eq!(state.location, LocationType::Town(2));
@@ -424,7 +438,17 @@ mod tests {
         assert_eq!(state.tiles[0], 0x01); // water
         assert_eq!(state.tiles[1], 0x05); // grass
         assert!(state.combat_tiles.is_none());
-        assert!(state.visibility_tiles.is_some());
+        let visibility = state
+            .visibility_tiles
+            .expect("2D scenes should include the projected 11x11 visibility window");
+        assert_eq!(visibility[0], 0x00);
+        assert_eq!(visibility[VIEWPORT_VISIBILITY_WIDTH - 1], 0x0A);
+        let middle_row = VIEWPORT_VISIBILITY_WIDTH * 5;
+        assert_eq!(visibility[middle_row], 0x50);
+        assert_eq!(
+            visibility[VIEWPORT_VISIBILITY_LEN - 1],
+            0xA0 | (VIEWPORT_VISIBILITY_WIDTH as u8 - 1)
+        );
         assert!(state.objects.is_empty()); // no objects written
     }
 
