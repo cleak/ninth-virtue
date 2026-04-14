@@ -13,7 +13,15 @@ pub(crate) struct EnvVarGuard {
 
 impl EnvVarGuard {
     pub(crate) fn new(name: &'static str) -> Self {
-        let lock = TEST_PROCESS_ENV_LOCK.lock().unwrap();
+        let lock = match TEST_PROCESS_ENV_LOCK.lock() {
+            Ok(lock) => lock,
+            Err(poisoned) => {
+                // Test failures should not cascade into unrelated env-var tests.
+                let lock = poisoned.into_inner();
+                TEST_PROCESS_ENV_LOCK.clear_poison();
+                lock
+            }
+        };
         let previous_value = std::env::var_os(name);
         Self {
             _lock: lock,
