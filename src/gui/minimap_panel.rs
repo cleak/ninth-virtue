@@ -4,7 +4,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use egui::epaint::PaintCallbackInfo;
-use egui::{Align2, Color32, FontId, Pos2, Rect, Stroke, StrokeKind, vec2};
+use egui::{
+    Align, Align2, Color32, FontId, Layout, Pos2, Rect, Stroke, StrokeKind, UiBuilder, vec2,
+};
 
 use crate::game::map::{CardinalDirection, LocationType, MapState, ObjectEntry, TileGridEncoding};
 use crate::game::offsets::{
@@ -407,9 +409,10 @@ pub fn show(
     let map_spacing_y = ui.spacing().item_spacing.y;
 
     if is_dungeon {
-        ui.scope(|ui| {
-            render_minimap_header(ui, state, &map, world_map.is_some());
-            ui.spacing_mut().item_spacing.y = 0.0;
+        let _ = with_stable_minimap_canvas(ui, |ui| {
+            render_header_without_trailing_gap(ui, |ui| {
+                render_minimap_header(ui, state, &map, world_map.is_some());
+            });
             show_dungeon_map(ui, state, &map, map_spacing_y);
         });
         return;
@@ -495,11 +498,12 @@ pub fn show(
         (grid_dims, player_tile, fog_data)
     };
 
-    ui.scope(|ui| {
-        render_minimap_header(ui, state, &map, world_map.is_some());
-        ui.spacing_mut().item_spacing.y = 0.0;
+    let _ = with_stable_minimap_canvas(ui, |ui| {
+        render_header_without_trailing_gap(ui, |ui| {
+            render_minimap_header(ui, state, &map, world_map.is_some());
+        });
 
-        let Some(rect) = allocate_minimap_rect(ui, map_spacing_y) else {
+        let Some(rect) = minimap_rect_in_remaining_canvas(ui, map_spacing_y) else {
             return;
         };
 
@@ -579,9 +583,10 @@ pub fn show_dungeon_without_atlas(ui: &mut egui::Ui, state: &mut MinimapState) {
     }
 
     let map_spacing_y = ui.spacing().item_spacing.y;
-    ui.scope(|ui| {
-        render_minimap_header(ui, state, &map, false);
-        ui.spacing_mut().item_spacing.y = 0.0;
+    let _ = with_stable_minimap_canvas(ui, |ui| {
+        render_header_without_trailing_gap(ui, |ui| {
+            render_minimap_header(ui, state, &map, false);
+        });
         show_dungeon_map(ui, state, &map, map_spacing_y);
     });
     show_fog_reset_confirmation(ui.ctx(), state);
@@ -690,17 +695,40 @@ fn render_minimap_header(
     });
 }
 
-fn allocate_minimap_rect(ui: &mut egui::Ui, top_gap: f32) -> Option<Rect> {
+fn with_stable_minimap_canvas<R>(
+    ui: &mut egui::Ui,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> Option<R> {
     let available = ui.available_size_before_wrap();
     if available.x <= 0.0 || available.y <= 0.0 {
         return None;
     }
 
     let (canvas_rect, _response) = ui.allocate_exact_size(available, egui::Sense::hover());
+    // Fill the whole minimap panel ourselves so refreshes never expose the
+    // parent clear color between the header and the map viewport.
     ui.painter()
         .rect_filled(canvas_rect, 0.0, ui.visuals().panel_fill);
+    let mut canvas_ui = ui.new_child(
+        UiBuilder::new()
+            .max_rect(canvas_rect)
+            .layout(Layout::top_down(Align::Min)),
+    );
 
-    let rect = minimap_rect_with_top_gap(canvas_rect, top_gap);
+    Some(add_contents(&mut canvas_ui))
+}
+
+fn render_header_without_trailing_gap(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
+    let item_spacing = ui.spacing().item_spacing;
+    ui.spacing_mut().item_spacing.y = 0.0;
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing = item_spacing;
+        add_contents(ui);
+    });
+}
+
+fn minimap_rect_in_remaining_canvas(ui: &egui::Ui, top_gap: f32) -> Option<Rect> {
+    let rect = minimap_rect_with_top_gap(ui.available_rect_before_wrap(), top_gap);
     rect.is_positive().then_some(rect)
 }
 
@@ -1008,7 +1036,7 @@ impl<'a> FogProjection<'a> {
 }
 
 fn show_dungeon_map(ui: &mut egui::Ui, state: &mut MinimapState, map: &MapState, top_gap: f32) {
-    let Some(rect) = allocate_minimap_rect(ui, top_gap) else {
+    let Some(rect) = minimap_rect_in_remaining_canvas(ui, top_gap) else {
         return;
     };
 
