@@ -82,6 +82,17 @@ pub struct UltimaCompanion {
     audio_muted: bool,
 }
 
+struct CachedGameStateRefs<'a> {
+    party: &'a mut Vec<Character>,
+    inventory: &'a mut Inventory,
+    shrine_quest: &'a mut ShrineQuest,
+    frigates: &'a mut Vec<Frigate>,
+    minimap: &'a mut MinimapState,
+    status_msg: &'a mut String,
+    party_locks: &'a PartyLocks,
+    inventory_locks: &'a InventoryLocks,
+}
+
 impl UltimaCompanion {
     pub fn new() -> Self {
         let persistent_locks = preferences::load_lock_preferences();
@@ -454,55 +465,22 @@ impl UltimaCompanion {
 
         let pid = attached.process.pid;
         let mem: &dyn MemoryAccess = &attached.process.memory;
-        let mut game_written = false;
-
-        match Self::refresh_party_cache(mem, dos_base, &self.party_locks, &self.party) {
-            Ok((party, wrote)) => {
-                self.party = party;
-                game_written |= wrote;
-            }
-            Err((msg, party)) => {
-                self.party = party;
-                self.status_msg = msg;
-                return;
-            }
-        }
-
-        match Self::refresh_inventory_cache(mem, dos_base, &self.inventory_locks, &self.inventory) {
-            Ok((inventory, wrote)) => {
-                self.inventory = inventory;
-                game_written |= wrote;
-            }
-            Err((msg, inventory)) => {
-                self.inventory = inventory;
-                self.status_msg = msg;
-                return;
-            }
-        }
-
-        match read_shrine_quest(mem, dos_base) {
-            Ok(sq) => self.shrine_quest = sq,
-            Err(e) => {
-                self.status_msg = format!("Read shrine quest failed: {e}");
-                return;
-            }
-        }
-
-        match vehicle::read_frigates(mem, dos_base) {
-            Ok(f) => self.frigates = f,
-            Err(e) => {
-                self.frigates.clear();
-                self.status_msg = format!("Read frigates failed: {e}");
-                return;
-            }
-        }
-
-        match map::read_map_state(mem, dos_base) {
-            Ok(ms) => self.minimap.map = Some(ms),
-            Err(e) => {
-                self.status_msg = format!("Read map failed: {e}");
-            }
-        }
+        let connected_status = format!("Connected to {} (PID {})", attached.process.name, pid);
+        let game_written = Self::refresh_cached_game_state_fields(
+            CachedGameStateRefs {
+                party: &mut self.party,
+                inventory: &mut self.inventory,
+                shrine_quest: &mut self.shrine_quest,
+                frigates: &mut self.frigates,
+                minimap: &mut self.minimap,
+                status_msg: &mut self.status_msg,
+                party_locks: &self.party_locks,
+                inventory_locks: &self.inventory_locks,
+            },
+            mem,
+            dos_base,
+            &connected_status,
+        );
 
         if game_written && let Some(ref patch) = self.patch_state {
             let _ = injection::trigger_redraw(mem, patch);
@@ -513,6 +491,90 @@ impl UltimaCompanion {
         self.try_acquire_audio(pid);
 
         self.last_refresh = Instant::now();
+    }
+
+    fn refresh_cached_game_state_fields(
+        state: CachedGameStateRefs<'_>,
+        mem: &dyn MemoryAccess,
+        dos_base: usize,
+        connected_status: &str,
+    ) -> bool {
+        let CachedGameStateRefs {
+            party,
+            inventory,
+            shrine_quest,
+            frigates,
+            minimap,
+            status_msg,
+            party_locks,
+            inventory_locks,
+        } = state;
+        let mut game_written = false;
+        let mut refresh_error: Option<String> = None;
+        let mut note_refresh_error = |msg: String| {
+            if refresh_error.is_none() {
+                refresh_error = Some(msg);
+            }
+        };
+
+        match Self::refresh_party_cache(mem, dos_base, party_locks, party) {
+            Ok((latest_party, wrote)) => {
+                *party = latest_party;
+                game_written |= wrote;
+            }
+            Err((msg, latest_party)) => {
+                *party = latest_party;
+                note_refresh_error(msg);
+            }
+        }
+
+        match Self::refresh_inventory_cache(mem, dos_base, inventory_locks, inventory) {
+            Ok((latest_inventory, wrote)) => {
+                *inventory = latest_inventory;
+                game_written |= wrote;
+            }
+            Err((msg, latest_inventory)) => {
+                *inventory = latest_inventory;
+                note_refresh_error(msg);
+            }
+        }
+
+        match read_shrine_quest(mem, dos_base) {
+            Ok(sq) => *shrine_quest = sq,
+            Err(e) => note_refresh_error(format!("Read shrine quest failed: {e}")),
+        }
+
+        match vehicle::read_frigates(mem, dos_base) {
+            Ok(f) => *frigates = f,
+            Err(e) => note_refresh_error(format!("Read frigates failed: {e}")),
+        }
+
+        match map::read_map_state(mem, dos_base) {
+            Ok(ms) => minimap.map = Some(ms),
+            Err(e) => note_refresh_error(format!("Read map failed: {e}")),
+        }
+
+        if let Some(msg) = refresh_error {
+            *status_msg = msg;
+        } else if Self::is_transient_refresh_status(status_msg) {
+            *status_msg = connected_status.to_string();
+        }
+
+        game_written
+    }
+
+    fn is_transient_refresh_status(status_msg: &str) -> bool {
+        [
+            "Read party failed:",
+            "Write character failed:",
+            "Read inventory failed:",
+            "Write inventory failed:",
+            "Read shrine quest failed:",
+            "Read frigates failed:",
+            "Read map failed:",
+        ]
+        .into_iter()
+        .any(|prefix| status_msg.starts_with(prefix))
     }
 
     fn refresh_party_cache(
@@ -1041,5 +1103,85 @@ mod tests {
         assert_eq!(app.inventory, read_inventory(&mem, 0).unwrap());
         assert_eq!(app.inventory.food, 9999);
         assert_eq!(app.inventory.gold, 1200);
+    }
+
+    #[test]
+    fn refresh_cached_game_state_updates_map_even_when_party_read_fails() {
+        let mem = FailingMemory::new(SAVE_BASE + 0x10000, usize::MAX);
+        seed_party_memory(&mem);
+        seed_inventory_memory(&mem);
+        mem.set_bytes(char_addr(0, 0, CHAR_GENDER), &[0x08]);
+
+        let mut app = test_app();
+        let connected_status = "Connected to dosbox (PID 1234)";
+
+        UltimaCompanion::refresh_cached_game_state_fields(
+            CachedGameStateRefs {
+                party: &mut app.party,
+                inventory: &mut app.inventory,
+                shrine_quest: &mut app.shrine_quest,
+                frigates: &mut app.frigates,
+                minimap: &mut app.minimap,
+                status_msg: &mut app.status_msg,
+                party_locks: &app.party_locks,
+                inventory_locks: &app.inventory_locks,
+            },
+            &mem,
+            0,
+            connected_status,
+        );
+
+        assert_eq!(
+            app.status_msg,
+            "Read party failed: invalid gender byte: 0x8"
+        );
+        assert!(app.minimap.map.is_some());
+    }
+
+    #[test]
+    fn refresh_cached_game_state_clears_transient_status_after_recovery() {
+        let mem = FailingMemory::new(SAVE_BASE + 0x10000, usize::MAX);
+        seed_party_memory(&mem);
+        seed_inventory_memory(&mem);
+        mem.set_bytes(char_addr(0, 0, CHAR_GENDER), &[0x08]);
+
+        let mut app = test_app();
+        let connected_status = "Connected to dosbox (PID 1234)";
+
+        UltimaCompanion::refresh_cached_game_state_fields(
+            CachedGameStateRefs {
+                party: &mut app.party,
+                inventory: &mut app.inventory,
+                shrine_quest: &mut app.shrine_quest,
+                frigates: &mut app.frigates,
+                minimap: &mut app.minimap,
+                status_msg: &mut app.status_msg,
+                party_locks: &app.party_locks,
+                inventory_locks: &app.inventory_locks,
+            },
+            &mem,
+            0,
+            connected_status,
+        );
+        mem.set_bytes(char_addr(0, 0, CHAR_GENDER), &[u8::from(Gender::Male)]);
+        UltimaCompanion::refresh_cached_game_state_fields(
+            CachedGameStateRefs {
+                party: &mut app.party,
+                inventory: &mut app.inventory,
+                shrine_quest: &mut app.shrine_quest,
+                frigates: &mut app.frigates,
+                minimap: &mut app.minimap,
+                status_msg: &mut app.status_msg,
+                party_locks: &app.party_locks,
+                inventory_locks: &app.inventory_locks,
+            },
+            &mem,
+            0,
+            connected_status,
+        );
+
+        assert_eq!(app.status_msg, connected_status);
+        assert_eq!(app.party.len(), 1);
+        assert!(app.minimap.map.is_some());
     }
 }
