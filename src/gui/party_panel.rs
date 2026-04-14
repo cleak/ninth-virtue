@@ -53,15 +53,43 @@ fn column_span_width(start: usize, end: usize, gap: f32) -> f32 {
 }
 
 /// Find the frigate the party is currently aboard, if any.
-fn current_ship<'a>(
-    frigates: &'a mut [Frigate],
+fn resolve_current_ship_slot(
+    frigates: &[Frigate],
     map: Option<&MapState>,
-) -> Option<&'a mut Frigate> {
+    previous_slot: Option<usize>,
+) -> Option<usize> {
     let map = map?;
     if !is_frigate_tile(map.transport) {
         return None;
     }
-    frigates.iter_mut().find(|f| f.x == map.x && f.y == map.y)
+
+    if let Some(slot) = frigates
+        .iter()
+        .find(|f| f.x == map.x && f.y == map.y)
+        .map(|f| f.slot)
+    {
+        return Some(slot);
+    }
+
+    if let Some(slot) = previous_slot.filter(|slot| frigates.iter().any(|f| f.slot == *slot)) {
+        return Some(slot);
+    }
+
+    frigates
+        .iter()
+        .min_by_key(|frigate| {
+            wrapped_axis_distance(frigate.x, map.x) + wrapped_axis_distance(frigate.y, map.y)
+        })
+        .map(|frigate| frigate.slot)
+}
+
+fn current_ship_by_slot_mut(frigates: &mut [Frigate], slot: usize) -> Option<&mut Frigate> {
+    frigates.iter_mut().find(|frigate| frigate.slot == slot)
+}
+
+fn wrapped_axis_distance(a: u8, b: u8) -> u16 {
+    let delta = a.abs_diff(b) as u16;
+    delta.min(256 - delta)
 }
 
 /// Returns `true` if any character data was written to game memory.
@@ -70,6 +98,7 @@ pub fn show(
     party: &mut [Character],
     locks: &mut PartyLocks,
     frigates: &mut [Frigate],
+    current_ship_slot: &mut Option<usize>,
     map: Option<&MapState>,
     mem: Option<(&dyn MemoryAccess, usize)>,
 ) -> bool {
@@ -269,39 +298,166 @@ pub fn show(
             });
         });
 
-    // Show current ship stats when the party is aboard a frigate
-    if let Some(ship) = current_ship(frigates, map) {
+    let ship_panel_visible = map.is_some_and(|map| is_frigate_tile(map.transport));
+    *current_ship_slot = resolve_current_ship_slot(frigates, map, *current_ship_slot);
+
+    // Keep the ship row mounted whenever the transport byte says we are
+    // sailing so transient mismatches between map and object snapshots cannot
+    // resize the dashboard above the minimap.
+    if ship_panel_visible {
         let ship_color = egui::Color32::from_rgb(120, 200, 220);
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            ui.label(
-                egui::RichText::new(format!("\u{26F5} {} Hull:", ship.label())).color(ship_color),
-            );
-            if ui
-                .add(egui::DragValue::new(&mut ship.hull).range(0..=FRIGATE_MAX_HULL))
-                .changed()
-                && let Some((mem, dos_base)) = mem
-            {
-                let _ = write_frigate_hull(mem, dos_base, ship);
-                wrote = true;
-            }
-            ui.label(format!("/ {FRIGATE_MAX_HULL}"));
+            let mut placeholder_hull = 0u8;
+            let mut placeholder_skiffs = 0u8;
 
-            if !ship.is_pirate() {
-                ui.add_space(12.0);
-                ui.label(egui::RichText::new("Skiffs:").color(ship_color));
+            if let Some(ship) =
+                current_ship_slot.and_then(|slot| current_ship_by_slot_mut(frigates, slot))
+            {
+                ui.label(
+                    egui::RichText::new(format!("\u{26F5} {} Hull:", ship.label()))
+                        .color(ship_color),
+                );
                 if ui
-                    .add(egui::DragValue::new(&mut ship.skiffs).range(0..=u8::MAX))
+                    .add(egui::DragValue::new(&mut ship.hull).range(0..=FRIGATE_MAX_HULL))
                     .changed()
                     && let Some((mem, dos_base)) = mem
                 {
-                    let _ = write_frigate_skiffs(mem, dos_base, ship);
+                    let _ = write_frigate_hull(mem, dos_base, ship);
                     wrote = true;
                 }
+                ui.label(format!("/ {FRIGATE_MAX_HULL}"));
+
+                if !ship.is_pirate() {
+                    ui.add_space(12.0);
+                    ui.label(egui::RichText::new("Skiffs:").color(ship_color));
+                    if ui
+                        .add(egui::DragValue::new(&mut ship.skiffs).range(0..=u8::MAX))
+                        .changed()
+                        && let Some((mem, dos_base)) = mem
+                    {
+                        let _ = write_frigate_skiffs(mem, dos_base, ship);
+                        wrote = true;
+                    }
+                }
+            } else {
+                ui.label(egui::RichText::new("\u{26F5} Ship Hull:").color(ship_color));
+                ui.add_enabled(
+                    false,
+                    egui::DragValue::new(&mut placeholder_hull).range(0..=FRIGATE_MAX_HULL),
+                );
+                ui.label(format!("/ {FRIGATE_MAX_HULL}"));
+                ui.add_space(12.0);
+                ui.label(egui::RichText::new("Skiffs:").color(ship_color));
+                ui.add_enabled(
+                    false,
+                    egui::DragValue::new(&mut placeholder_skiffs).range(0..=u8::MAX),
+                );
             }
         });
     }
 
     wrote
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::map::LocationType;
+    use crate::game::offsets::MAP_TILES_LEN;
+
+    fn test_map(transport: u8, x: u8, y: u8) -> MapState {
+        MapState {
+            location: LocationType::Overworld,
+            z: 0,
+            x,
+            y,
+            dungeon_facing: None,
+            transport,
+            scroll_x: 0,
+            scroll_y: 0,
+            tiles: [0; MAP_TILES_LEN],
+            combat_tiles: None,
+            visibility_tiles: None,
+            objects: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn resolve_current_ship_slot_prefers_exact_match() {
+        let frigates = vec![
+            Frigate {
+                slot: 1,
+                tile: 36,
+                x: 10,
+                y: 10,
+                hull: 50,
+                skiffs: 2,
+            },
+            Frigate {
+                slot: 2,
+                tile: 36,
+                x: 40,
+                y: 40,
+                hull: 80,
+                skiffs: 1,
+            },
+        ];
+
+        let map = test_map(36, 40, 40);
+
+        assert_eq!(
+            resolve_current_ship_slot(&frigates, Some(&map), Some(1)),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn resolve_current_ship_slot_keeps_previous_slot_across_snapshot_mismatch() {
+        let frigates = vec![
+            Frigate {
+                slot: 1,
+                tile: 36,
+                x: 10,
+                y: 10,
+                hull: 50,
+                skiffs: 2,
+            },
+            Frigate {
+                slot: 2,
+                tile: 36,
+                x: 60,
+                y: 60,
+                hull: 80,
+                skiffs: 1,
+            },
+        ];
+
+        let map = test_map(36, 11, 10);
+
+        assert_eq!(
+            resolve_current_ship_slot(&frigates, Some(&map), Some(1)),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn resolve_current_ship_slot_clears_when_not_sailing() {
+        let frigates = vec![Frigate {
+            slot: 1,
+            tile: 36,
+            x: 10,
+            y: 10,
+            hull: 50,
+            skiffs: 2,
+        }];
+
+        let map = test_map(0, 10, 10);
+
+        assert_eq!(
+            resolve_current_ship_slot(&frigates, Some(&map), Some(1)),
+            None
+        );
+    }
 }

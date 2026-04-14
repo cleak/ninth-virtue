@@ -49,6 +49,7 @@ pub struct UltimaCompanion {
     inventory: Inventory,
     shrine_quest: ShrineQuest,
     frigates: Vec<Frigate>,
+    current_ship_slot: Option<usize>,
     minimap: MinimapState,
     game_dir: Option<PathBuf>,
     tile_atlas: Option<TileAtlas>,
@@ -104,6 +105,7 @@ impl UltimaCompanion {
             inventory: Inventory::default(),
             shrine_quest: ShrineQuest::default(),
             frigates: Vec::new(),
+            current_ship_slot: None,
             minimap: MinimapState::new(),
             game_dir: None,
             tile_atlas: None,
@@ -328,6 +330,7 @@ impl UltimaCompanion {
         self.inventory = Inventory::default();
         self.shrine_quest = ShrineQuest::default();
         self.frigates.clear();
+        self.current_ship_slot = None;
         self.minimap.clear();
         self.minimap.set_game_directory(None);
         self.game_dir = None;
@@ -764,6 +767,7 @@ impl eframe::App for UltimaCompanion {
             inventory_locks,
             shrine_quest,
             frigates,
+            current_ship_slot,
             minimap,
             tile_atlas,
             tile_atlas_error,
@@ -798,6 +802,7 @@ impl eframe::App for UltimaCompanion {
                     party,
                     party_locks,
                     frigates,
+                    current_ship_slot,
                     minimap.map.as_ref(),
                     mem,
                 );
@@ -960,6 +965,7 @@ mod tests {
             inventory: Inventory::default(),
             shrine_quest: ShrineQuest::default(),
             frigates: Vec::new(),
+            current_ship_slot: None,
             minimap: MinimapState::new(),
             game_dir: Some(PathBuf::from("C:/games/u5")),
             tile_atlas: None,
