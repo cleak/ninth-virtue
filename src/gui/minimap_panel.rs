@@ -503,7 +503,7 @@ pub fn show(
             render_minimap_header(ui, state, &map, world_map.is_some());
         });
 
-        let Some(rect) = minimap_rect_in_remaining_canvas(ui, map_spacing_y) else {
+        let Some(rect) = allocate_minimap_rect(ui, map_spacing_y) else {
             return;
         };
 
@@ -727,8 +727,14 @@ fn render_header_without_trailing_gap(ui: &mut egui::Ui, add_contents: impl FnOn
     });
 }
 
-fn minimap_rect_in_remaining_canvas(ui: &egui::Ui, top_gap: f32) -> Option<Rect> {
-    let rect = minimap_rect_with_top_gap(ui.available_rect_before_wrap(), top_gap);
+fn allocate_minimap_rect(ui: &mut egui::Ui, top_gap: f32) -> Option<Rect> {
+    let available = ui.available_size_before_wrap();
+    if available.x <= 0.0 || available.y <= 0.0 {
+        return None;
+    }
+
+    let (canvas_rect, _response) = ui.allocate_exact_size(available, egui::Sense::hover());
+    let rect = minimap_rect_with_top_gap(canvas_rect, top_gap);
     rect.is_positive().then_some(rect)
 }
 
@@ -1036,7 +1042,7 @@ impl<'a> FogProjection<'a> {
 }
 
 fn show_dungeon_map(ui: &mut egui::Ui, state: &mut MinimapState, map: &MapState, top_gap: f32) {
-    let Some(rect) = minimap_rect_in_remaining_canvas(ui, top_gap) else {
+    let Some(rect) = allocate_minimap_rect(ui, top_gap) else {
         return;
     };
 
@@ -2721,6 +2727,31 @@ mod tests {
         assert_eq!(rect.top(), 32.0);
         assert_eq!(rect.size(), vec2(268.0, 268.0));
         assert_eq!(rect.center().x, canvas.center().x);
+    }
+
+    #[test]
+    fn allocate_minimap_rect_uses_remaining_canvas_after_header_space() {
+        let mut rect = None;
+
+        egui::__run_test_ui(|ui| {
+            ui.scope_builder(
+                UiBuilder::new().max_rect(Rect::from_min_size(
+                    Pos2::new(10.0, 20.0),
+                    vec2(300.0, 500.0),
+                )),
+                |ui| {
+                    render_header_without_trailing_gap(ui, |ui| {
+                        let (_header_rect, _header_response) =
+                            ui.allocate_exact_size(vec2(300.0, 100.0), egui::Sense::hover());
+                    });
+                    rect = allocate_minimap_rect(ui, 8.0);
+                },
+            );
+        });
+
+        let rect = rect.expect("map rect should be allocated");
+        assert_eq!(rect.min, Pos2::new(10.0, 128.0));
+        assert_eq!(rect.size(), vec2(300.0, 300.0));
     }
 
     #[test]
