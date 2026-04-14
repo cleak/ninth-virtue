@@ -5,6 +5,7 @@ mod game;
 mod gui;
 mod icon;
 mod memory;
+mod preferences;
 mod tiles;
 
 fn main() -> eframe::Result {

@@ -221,20 +221,11 @@ fn save_fog_enabled(enabled: bool) {
 }
 
 fn bool_pref_path(file_name: &str) -> Option<PathBuf> {
-    let mut path = appdata_root()?;
-    path.push(file_name);
-    Some(path)
-}
-
-fn appdata_root() -> Option<PathBuf> {
-    let base = std::env::var_os("LOCALAPPDATA").or_else(|| std::env::var_os("APPDATA"))?;
-    let mut path = PathBuf::from(base);
-    path.push("The Ninth Virtue");
-    Some(path)
+    crate::preferences::appdata_file_path(file_name)
 }
 
 fn game_dir_path_for_key(game_key: &str) -> io::Result<PathBuf> {
-    let Some(mut path) = appdata_root() else {
+    let Some(mut path) = crate::preferences::appdata_root() else {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             "LOCALAPPDATA or APPDATA is unavailable",
