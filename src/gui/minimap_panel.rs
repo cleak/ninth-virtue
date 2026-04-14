@@ -4,9 +4,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use egui::epaint::PaintCallbackInfo;
-use egui::{
-    Align, Align2, Color32, FontId, Layout, Pos2, Rect, Stroke, StrokeKind, UiBuilder, vec2,
-};
+use egui::{Color32, FontId, Pos2, Rect, Stroke, StrokeKind, vec2};
 
 use crate::game::map::{CardinalDirection, LocationType, MapState, ObjectEntry, TileGridEncoding};
 use crate::game::offsets::{
@@ -406,15 +404,11 @@ pub fn show(
     let is_dungeon = matches!(map.location, LocationType::Dungeon(_));
     let is_outdoor = map.is_outdoor();
     let is_underworld = map.is_underworld();
-    let map_spacing_y = ui.spacing().item_spacing.y;
+
+    render_minimap_header(ui, state, &map, world_map.is_some());
 
     if is_dungeon {
-        let _ = with_stable_minimap_canvas(ui, |ui| {
-            render_header_without_trailing_gap(ui, |ui| {
-                render_minimap_header(ui, state, &map, world_map.is_some());
-            });
-            show_dungeon_map(ui, state, &map, map_spacing_y);
-        });
+        show_dungeon_map(ui, state, &map);
         return;
     }
 
@@ -498,19 +492,18 @@ pub fn show(
         (grid_dims, player_tile, fog_data)
     };
 
-    let _ = with_stable_minimap_canvas(ui, |ui| {
-        render_header_without_trailing_gap(ui, |ui| {
-            render_minimap_header(ui, state, &map, world_map.is_some());
-        });
+    // Allocate a centered square region for the minimap
+    let avail = ui.available_size();
+    let side = avail.x.min(avail.y);
 
-        let Some(rect) = allocate_minimap_rect(ui, map_spacing_y) else {
-            return;
-        };
+    // Issue paint callback inside centered layout
+    let gpu = state.gpu.clone();
+    let raw_atlas = state.raw_atlas.clone().unwrap();
 
-        // Issue paint callback inside a stable canvas so the header-to-map gap
-        // stays painted during refreshes without changing the map's size.
-        let gpu = state.gpu.clone();
-        let raw_atlas = state.raw_atlas.clone().unwrap();
+    ui.vertical_centered(|ui| {
+        let (rect, _response) =
+            ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
+
         let callback = egui_glow::CallbackFn::new(move |info: PaintCallbackInfo, painter| {
             let gl = painter.gl();
             let mut gpu = gpu.lock().unwrap();
@@ -582,13 +575,8 @@ pub fn show_dungeon_without_atlas(ui: &mut egui::Ui, state: &mut MinimapState) {
         return;
     }
 
-    let map_spacing_y = ui.spacing().item_spacing.y;
-    let _ = with_stable_minimap_canvas(ui, |ui| {
-        render_header_without_trailing_gap(ui, |ui| {
-            render_minimap_header(ui, state, &map, false);
-        });
-        show_dungeon_map(ui, state, &map, map_spacing_y);
-    });
+    render_minimap_header(ui, state, &map, false);
+    show_dungeon_map(ui, state, &map);
     show_fog_reset_confirmation(ui.ctx(), state);
 }
 
@@ -693,65 +681,6 @@ fn render_minimap_header(
             );
         }
     });
-}
-
-fn with_stable_minimap_canvas<R>(
-    ui: &mut egui::Ui,
-    add_contents: impl FnOnce(&mut egui::Ui) -> R,
-) -> Option<R> {
-    let available = ui.available_size_before_wrap();
-    if available.x <= 0.0 || available.y <= 0.0 {
-        return None;
-    }
-
-    let (canvas_rect, _response) = ui.allocate_exact_size(available, egui::Sense::hover());
-    // Fill the whole minimap panel ourselves so refreshes never expose the
-    // parent clear color between the header and the map viewport.
-    ui.painter()
-        .rect_filled(canvas_rect, 0.0, ui.visuals().panel_fill);
-    let mut canvas_ui = ui.new_child(
-        UiBuilder::new()
-            .max_rect(canvas_rect)
-            .layout(Layout::top_down(Align::Min)),
-    );
-
-    Some(add_contents(&mut canvas_ui))
-}
-
-fn render_header_without_trailing_gap(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
-    let item_spacing = ui.spacing().item_spacing;
-    ui.spacing_mut().item_spacing.y = 0.0;
-    ui.scope(|ui| {
-        ui.spacing_mut().item_spacing = item_spacing;
-        add_contents(ui);
-    });
-}
-
-fn allocate_minimap_rect(ui: &mut egui::Ui, top_gap: f32) -> Option<Rect> {
-    let available = ui.available_size_before_wrap();
-    if available.x <= 0.0 || available.y <= 0.0 {
-        return None;
-    }
-
-    let (canvas_rect, _response) = ui.allocate_exact_size(available, egui::Sense::hover());
-    // Keep the entire post-header band painted so the reserved gap above the
-    // square viewport never falls back to the underlying clear color.
-    ui.painter()
-        .rect_filled(canvas_rect, 0.0, ui.visuals().panel_fill);
-    let rect = minimap_rect_with_top_gap(canvas_rect, top_gap);
-    rect.is_positive().then_some(rect)
-}
-
-fn minimap_rect_with_top_gap(canvas_rect: Rect, top_gap: f32) -> Rect {
-    let bounds = Rect::from_min_max(
-        Pos2::new(
-            canvas_rect.min.x,
-            (canvas_rect.min.y + top_gap).min(canvas_rect.max.y),
-        ),
-        canvas_rect.max,
-    );
-    let side = bounds.width().min(bounds.height()).max(0.0);
-    Align2::CENTER_TOP.align_size_within_rect(vec2(side, side), bounds)
 }
 
 fn show_fog_reset_confirmation(ctx: &egui::Context, state: &mut MinimapState) {
@@ -1045,68 +974,71 @@ impl<'a> FogProjection<'a> {
     }
 }
 
-fn show_dungeon_map(ui: &mut egui::Ui, state: &mut MinimapState, map: &MapState, top_gap: f32) {
-    let Some(rect) = allocate_minimap_rect(ui, top_gap) else {
-        return;
-    };
+fn show_dungeon_map(ui: &mut egui::Ui, state: &mut MinimapState, map: &MapState) {
+    let avail = ui.available_size();
+    let side = avail.x.min(avail.y);
 
-    let painter = ui.painter_at(rect);
-    let grid = extract_dungeon_grid(&map.tiles);
-    let panel_rounding = 10.0;
-    let map_rect = rect.shrink((rect.width() * 0.014).max(4.0));
-    let player_tile = local_scene_player_tile(map);
+    ui.vertical_centered(|ui| {
+        let (rect, _response) =
+            ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
+        let painter = ui.painter_at(rect);
+        let grid = extract_dungeon_grid(&map.tiles);
+        let panel_rounding = 10.0;
+        let map_rect = rect.shrink((side * 0.014).max(4.0));
+        let player_tile = local_scene_player_tile(map);
 
-    painter.rect_filled(rect, panel_rounding, Color32::from_rgb(7, 10, 13));
-    painter.rect_stroke(
-        rect,
-        panel_rounding,
-        Stroke::new(1.0, Color32::from_rgb(32, 38, 46)),
-        StrokeKind::Inside,
-    );
-    painter.rect_filled(map_rect, 7.0, Color32::from_rgb(12, 16, 20));
-    painter.rect_stroke(
-        map_rect,
-        7.0,
-        Stroke::new(1.0, Color32::from_rgb(18, 24, 30)),
-        StrokeKind::Inside,
-    );
-    let map_painter = ui.painter_at(map_rect);
-    match state.dungeon_primary_view() {
-        DungeonPrimaryView::Centered => {
-            paint_centered_dungeon_cells(&map_painter, map_rect, &grid, player_tile);
-            if state.show_dungeon_corner_view() {
-                paint_dungeon_overview_inset(
+        painter.rect_filled(rect, panel_rounding, Color32::from_rgb(7, 10, 13));
+        painter.rect_stroke(
+            rect,
+            panel_rounding,
+            Stroke::new(1.0, Color32::from_rgb(32, 38, 46)),
+            StrokeKind::Inside,
+        );
+        painter.rect_filled(map_rect, 7.0, Color32::from_rgb(12, 16, 20));
+        painter.rect_stroke(
+            map_rect,
+            7.0,
+            Stroke::new(1.0, Color32::from_rgb(18, 24, 30)),
+            StrokeKind::Inside,
+        );
+        let map_painter = ui.painter_at(map_rect);
+        match state.dungeon_primary_view() {
+            DungeonPrimaryView::Centered => {
+                paint_centered_dungeon_cells(&map_painter, map_rect, &grid, player_tile);
+                if state.show_dungeon_corner_view() {
+                    paint_dungeon_overview_inset(
+                        ui,
+                        map_rect,
+                        &grid,
+                        player_tile,
+                        map.dungeon_facing,
+                        DungeonPrimaryView::Fixed,
+                    );
+                }
+                paint_centered_dungeon_player_marker(ui, map_rect, map.dungeon_facing);
+            }
+            DungeonPrimaryView::Fixed => {
+                paint_fixed_dungeon_cells(&map_painter, map_rect, &grid);
+                if state.show_dungeon_corner_view() {
+                    paint_dungeon_overview_inset(
+                        ui,
+                        map_rect,
+                        &grid,
+                        player_tile,
+                        map.dungeon_facing,
+                        DungeonPrimaryView::Centered,
+                    );
+                }
+                paint_player_marker(
                     ui,
                     map_rect,
-                    &grid,
+                    (DUNGEON_LEVEL_WIDTH as u32, DUNGEON_LEVEL_HEIGHT as u32),
                     player_tile,
                     map.dungeon_facing,
-                    DungeonPrimaryView::Fixed,
                 );
             }
-            paint_centered_dungeon_player_marker(ui, map_rect, map.dungeon_facing);
         }
-        DungeonPrimaryView::Fixed => {
-            paint_fixed_dungeon_cells(&map_painter, map_rect, &grid);
-            if state.show_dungeon_corner_view() {
-                paint_dungeon_overview_inset(
-                    ui,
-                    map_rect,
-                    &grid,
-                    player_tile,
-                    map.dungeon_facing,
-                    DungeonPrimaryView::Centered,
-                );
-            }
-            paint_player_marker(
-                ui,
-                map_rect,
-                (DUNGEON_LEVEL_WIDTH as u32, DUNGEON_LEVEL_HEIGHT as u32),
-                player_tile,
-                map.dungeon_facing,
-            );
-        }
-    }
+    });
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2712,50 +2644,6 @@ mod tests {
 
         assert_eq!(cell.min, Pos2::new(76.0, 124.0));
         assert_eq!(cell.max, Pos2::new(96.0, 144.0));
-    }
-
-    #[test]
-    fn minimap_rect_with_top_gap_preserves_gap_and_width_limited_square() {
-        let canvas = Rect::from_min_size(Pos2::new(10.0, 20.0), vec2(300.0, 500.0));
-        let rect = minimap_rect_with_top_gap(canvas, 8.0);
-
-        assert_eq!(rect.min, Pos2::new(10.0, 28.0));
-        assert_eq!(rect.size(), vec2(300.0, 300.0));
-    }
-
-    #[test]
-    fn minimap_rect_with_top_gap_centers_height_limited_square_horizontally() {
-        let canvas = Rect::from_min_size(Pos2::new(10.0, 20.0), vec2(420.0, 280.0));
-        let rect = minimap_rect_with_top_gap(canvas, 12.0);
-
-        assert_eq!(rect.top(), 32.0);
-        assert_eq!(rect.size(), vec2(268.0, 268.0));
-        assert_eq!(rect.center().x, canvas.center().x);
-    }
-
-    #[test]
-    fn allocate_minimap_rect_uses_remaining_canvas_after_header_space() {
-        let mut rect = None;
-
-        egui::__run_test_ui(|ui| {
-            ui.scope_builder(
-                UiBuilder::new().max_rect(Rect::from_min_size(
-                    Pos2::new(10.0, 20.0),
-                    vec2(300.0, 500.0),
-                )),
-                |ui| {
-                    render_header_without_trailing_gap(ui, |ui| {
-                        let (_header_rect, _header_response) =
-                            ui.allocate_exact_size(vec2(300.0, 100.0), egui::Sense::hover());
-                    });
-                    rect = allocate_minimap_rect(ui, 8.0);
-                },
-            );
-        });
-
-        let rect = rect.expect("map rect should be allocated");
-        assert_eq!(rect.min, Pos2::new(10.0, 128.0));
-        assert_eq!(rect.size(), vec2(300.0, 300.0));
     }
 
     #[test]

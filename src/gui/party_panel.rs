@@ -75,21 +75,11 @@ fn resolve_current_ship_slot(
         return Some(slot);
     }
 
-    frigates
-        .iter()
-        .min_by_key(|frigate| {
-            wrapped_axis_distance(frigate.x, map.x) + wrapped_axis_distance(frigate.y, map.y)
-        })
-        .map(|frigate| frigate.slot)
+    None
 }
 
 fn current_ship_by_slot_mut(frigates: &mut [Frigate], slot: usize) -> Option<&mut Frigate> {
     frigates.iter_mut().find(|frigate| frigate.slot == slot)
-}
-
-fn wrapped_axis_distance(a: u8, b: u8) -> u16 {
-    let delta = a.abs_diff(b) as u16;
-    delta.min(256 - delta)
 }
 
 /// Returns `true` if any character data was written to game memory.
