@@ -17,6 +17,40 @@ const HP_COL_WIDTH: f32 = 45.0;
 const MAX_HP_COL_WIDTH: f32 = 50.0;
 const XP_COL_WIDTH: f32 = 50.0;
 const LVL_COL_WIDTH: f32 = 35.0;
+const PARTY_COLUMNS: [(&str, f32); 11] = [
+    ("Name", NAME_COL_WIDTH),
+    ("Class", CLASS_COL_WIDTH),
+    ("Status", STATUS_COL_WIDTH),
+    ("STR", STAT_COL_WIDTH),
+    ("DEX", STAT_COL_WIDTH),
+    ("INT", STAT_COL_WIDTH),
+    ("MP", MP_COL_WIDTH),
+    ("HP", HP_COL_WIDTH),
+    ("MaxHP", MAX_HP_COL_WIDTH),
+    ("XP", XP_COL_WIDTH),
+    ("Lvl", LVL_COL_WIDTH),
+];
+const MP_COLUMN_INDEX: usize = 6;
+const HP_COLUMN_INDEX: usize = 7;
+
+fn party_columns(table: TableBuilder<'_>) -> TableBuilder<'_> {
+    PARTY_COLUMNS.iter().fold(table, |table, (_, width)| {
+        table.column(Column::exact(*width))
+    })
+}
+
+fn column_width(index: usize) -> f32 {
+    PARTY_COLUMNS[index].1
+}
+
+fn column_span_width(start: usize, end: usize, gap: f32) -> f32 {
+    let widths = PARTY_COLUMNS[start..end]
+        .iter()
+        .map(|(_, width)| *width)
+        .sum::<f32>();
+    let gaps = (end - start).saturating_sub(1) as f32 * gap;
+    widths + gaps
+}
 
 /// Find the frigate the party is currently aboard, if any.
 fn current_ship<'a>(
@@ -40,24 +74,21 @@ pub fn show(
     mem: Option<(&dyn MemoryAccess, usize)>,
 ) -> bool {
     let mut wrote = false;
+    let has_party = !party.is_empty();
+    let lock_row_height = ui.spacing().interact_size.y;
+    let column_gap = ui.spacing().item_spacing.x;
+    // Keep the title span and trailing spacer derived from the same column
+    // widths as the party table so the MP/HP lock cells stay aligned.
+    let lead_width = column_span_width(0, MP_COLUMN_INDEX, column_gap);
+    let trailing_width = column_span_width(HP_COLUMN_INDEX + 1, PARTY_COLUMNS.len(), column_gap);
 
     ui.horizontal(|ui| {
-        let gap = ui.spacing().item_spacing.x;
-        // `ui.horizontal` inserts one gap between these cells, so the lead
-        // width only needs the first five table gaps to land the next cell on
-        // the MP column start.
-        let lead_width = NAME_COL_WIDTH
-            + CLASS_COL_WIDTH
-            + STATUS_COL_WIDTH
-            + (STAT_COL_WIDTH * 3.0)
-            + (gap * 5.0);
-
         ui.allocate_ui_with_layout(
-            egui::vec2(lead_width, ui.spacing().interact_size.y),
+            egui::vec2(lead_width, lock_row_height),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                ui.label(egui::RichText::new("⚔").heading());
+                ui.label(egui::RichText::new("\u{2694}").heading());
                 ui.label(
                     egui::RichText::new("Party")
                         .heading()
@@ -67,89 +98,50 @@ pub fn show(
         );
 
         ui.allocate_ui_with_layout(
-            egui::vec2(MP_COL_WIDTH, ui.spacing().interact_size.y),
+            egui::vec2(column_width(MP_COLUMN_INDEX), lock_row_height),
             egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
             |ui| {
-                crate::gui::infinity_checkbox(
-                    ui,
-                    &mut locks.mana,
-                    "Lock mana at 99 for the whole party.",
-                );
+                if has_party {
+                    crate::gui::infinity_checkbox(
+                        ui,
+                        &mut locks.mana,
+                        "Lock mana at 99 for the whole party.",
+                    );
+                }
             },
         );
 
         ui.allocate_ui_with_layout(
-            egui::vec2(HP_COL_WIDTH, ui.spacing().interact_size.y),
+            egui::vec2(column_width(HP_COLUMN_INDEX), lock_row_height),
             egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
             |ui| {
-                crate::gui::infinity_checkbox(
-                    ui,
-                    &mut locks.health,
-                    "Lock health at max and force Good status for the whole party.",
-                );
+                if has_party {
+                    crate::gui::infinity_checkbox(
+                        ui,
+                        &mut locks.health,
+                        "Lock health at max and force Good status for the whole party.",
+                    );
+                }
             },
         );
 
-        let trailing_width = MAX_HP_COL_WIDTH + XP_COL_WIDTH + LVL_COL_WIDTH + (gap * 2.0);
-        ui.allocate_ui(
-            egui::vec2(trailing_width, ui.spacing().interact_size.y),
-            |_| {},
-        );
+        ui.allocate_ui(egui::vec2(trailing_width, lock_row_height), |_| {});
     });
 
-    if party.is_empty() {
+    if !has_party {
         ui.label("No party data loaded.");
         return false;
     }
 
-    TableBuilder::new(ui)
-        .column(Column::exact(NAME_COL_WIDTH)) // Name
-        .column(Column::exact(CLASS_COL_WIDTH)) // Class
-        .column(Column::exact(STATUS_COL_WIDTH)) // Status
-        .column(Column::exact(STAT_COL_WIDTH)) // STR
-        .column(Column::exact(STAT_COL_WIDTH)) // DEX
-        .column(Column::exact(STAT_COL_WIDTH)) // INT
-        .column(Column::exact(MP_COL_WIDTH)) // MP
-        .column(Column::exact(HP_COL_WIDTH)) // HP
-        .column(Column::exact(MAX_HP_COL_WIDTH)) // MaxHP
-        .column(Column::exact(XP_COL_WIDTH)) // XP
-        .column(Column::exact(LVL_COL_WIDTH)) // Lvl
+    party_columns(TableBuilder::new(ui))
         .striped(true)
         .header(20.0, |mut header| {
             let hdr = egui::Color32::from_rgb(140, 180, 255);
-            header.col(|ui| {
-                ui.colored_label(hdr, "Name");
-            });
-            header.col(|ui| {
-                ui.colored_label(hdr, "Class");
-            });
-            header.col(|ui| {
-                ui.colored_label(hdr, "Status");
-            });
-            header.col(|ui| {
-                ui.colored_label(hdr, "STR");
-            });
-            header.col(|ui| {
-                ui.colored_label(hdr, "DEX");
-            });
-            header.col(|ui| {
-                ui.colored_label(hdr, "INT");
-            });
-            header.col(|ui| {
-                ui.colored_label(hdr, "MP");
-            });
-            header.col(|ui| {
-                ui.colored_label(hdr, "HP");
-            });
-            header.col(|ui| {
-                ui.colored_label(hdr, "MaxHP");
-            });
-            header.col(|ui| {
-                ui.colored_label(hdr, "XP");
-            });
-            header.col(|ui| {
-                ui.colored_label(hdr, "Lvl");
-            });
+            for &(label, _) in &PARTY_COLUMNS {
+                header.col(|ui| {
+                    ui.colored_label(hdr, label);
+                });
+            }
         })
         .body(|body| {
             body.rows(22.0, party.len(), |mut row| {
@@ -283,7 +275,9 @@ pub fn show(
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            ui.label(egui::RichText::new(format!("⛵ {} Hull:", ship.label())).color(ship_color));
+            ui.label(
+                egui::RichText::new(format!("\u{26F5} {} Hull:", ship.label())).color(ship_color),
+            );
             if ui
                 .add(egui::DragValue::new(&mut ship.hull).range(0..=FRIGATE_MAX_HULL))
                 .changed()
