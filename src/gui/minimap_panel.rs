@@ -734,6 +734,10 @@ fn allocate_minimap_rect(ui: &mut egui::Ui, top_gap: f32) -> Option<Rect> {
     }
 
     let (canvas_rect, _response) = ui.allocate_exact_size(available, egui::Sense::hover());
+    // Keep the entire post-header band painted so the reserved gap above the
+    // square viewport never falls back to the underlying clear color.
+    ui.painter()
+        .rect_filled(canvas_rect, 0.0, ui.visuals().panel_fill);
     let rect = minimap_rect_with_top_gap(canvas_rect, top_gap);
     rect.is_positive().then_some(rect)
 }

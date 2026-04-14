@@ -11,7 +11,9 @@ pub mod quest_panel;
 
 /// Styled frame for visually grouping a UI section.
 pub fn section_frame(ui: &egui::Ui) -> egui::Frame {
-    egui::Frame::group(ui.style()).inner_margin(8.0)
+    egui::Frame::group(ui.style())
+        .fill(ui.visuals().panel_fill)
+        .inner_margin(8.0)
 }
 
 pub fn infinity_checkbox(ui: &mut egui::Ui, locked: &mut bool, tooltip: &str) -> egui::Response {
