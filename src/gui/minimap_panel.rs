@@ -1251,11 +1251,7 @@ fn minimap_pref_path() -> Option<PathBuf> {
 }
 
 fn bool_pref_path(file_name: &str) -> Option<PathBuf> {
-    let base = std::env::var_os("LOCALAPPDATA").or_else(|| std::env::var_os("APPDATA"))?;
-    let mut path = PathBuf::from(base);
-    path.push("The Ninth Virtue");
-    path.push(file_name);
-    Some(path)
+    crate::preferences::appdata_file_path(file_name)
 }
 
 fn paint_dungeon_cell(painter: &egui::Painter, rect: Rect, kind: DungeonCellKind) {

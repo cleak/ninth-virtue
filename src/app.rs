@@ -20,6 +20,7 @@ use crate::gui::minimap_panel::MinimapState;
 use crate::memory::access::MemoryAccess;
 use crate::memory::process::{self, DosBoxProcess};
 use crate::memory::scanner;
+use crate::preferences;
 use crate::tiles::atlas::TileAtlas;
 use windows::Win32::Foundation::HANDLE;
 
@@ -83,6 +84,7 @@ pub struct UltimaCompanion {
 
 impl UltimaCompanion {
     pub fn new() -> Self {
+        let persistent_locks = preferences::load_lock_preferences();
         let mut app = Self {
             process_list: Vec::new(),
             selected_pid: None,
@@ -100,8 +102,8 @@ impl UltimaCompanion {
             last_rescan: Instant::now(),
             suppress_auto_attach: false,
             auto_refresh: true,
-            party_locks: PartyLocks::default(),
-            inventory_locks: InventoryLocks::default(),
+            party_locks: persistent_locks.party,
+            inventory_locks: persistent_locks.inventory,
             refresh_interval_secs: 0.025,
             last_refresh: Instant::now(),
             status_msg: "Searching for DOSBox...".to_string(),
@@ -657,6 +659,8 @@ impl eframe::App for UltimaCompanion {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        let previous_party_locks = self.party_locks.clone();
+        let previous_inventory_locks = self.inventory_locks.clone();
 
         // --- Connection bar ---
         let mut conn_action = gui::connection_bar::ConnectionAction::None;
@@ -787,6 +791,10 @@ impl eframe::App for UltimaCompanion {
                 }
             });
         });
+
+        if *party_locks != previous_party_locks || *inventory_locks != previous_inventory_locks {
+            preferences::save_lock_preferences(party_locks, inventory_locks);
+        }
 
         // After all panels have run, trigger a single redraw if any
         // panel wrote to game memory.
