@@ -492,42 +492,6 @@ pub fn validate_game_dir(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsString;
-    use std::sync::{LazyLock, Mutex, MutexGuard};
-
-    static TEST_PROCESS_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
-    struct LocalAppDataGuard {
-        _lock: MutexGuard<'static, ()>,
-        previous_value: Option<OsString>,
-    }
-
-    impl LocalAppDataGuard {
-        fn set(path: &Path) -> Self {
-            let lock = TEST_PROCESS_ENV_LOCK.lock().unwrap();
-            let previous_value = std::env::var_os("LOCALAPPDATA");
-            unsafe {
-                std::env::set_var("LOCALAPPDATA", path);
-            }
-            Self {
-                _lock: lock,
-                previous_value,
-            }
-        }
-    }
-
-    impl Drop for LocalAppDataGuard {
-        fn drop(&mut self) {
-            match self.previous_value.take() {
-                Some(value) => unsafe {
-                    std::env::set_var("LOCALAPPDATA", value);
-                },
-                None => unsafe {
-                    std::env::remove_var("LOCALAPPDATA");
-                },
-            }
-        }
-    }
 
     #[test]
     fn parse_conf_path_quoted() {
@@ -645,7 +609,8 @@ mod tests {
         std::fs::write(&portable_conf, "").unwrap();
         std::fs::write(&user_conf, "").unwrap();
 
-        let local_app_data_guard = LocalAppDataGuard::set(&local_app_data);
+        let mut local_app_data_guard = crate::test_support::EnvVarGuard::new("LOCALAPPDATA");
+        local_app_data_guard.set(&local_app_data);
 
         let cmdline = format!(
             r#""C:\Program Files\DOSBox-X\dosbox-x.exe" -conf "{}" -defaultdir "{}""#,

@@ -263,8 +263,6 @@ fn game_dir_storage_key(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsString;
-    use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -307,8 +305,7 @@ mod tests {
 
     #[test]
     fn record_visible_tiles_retries_dirty_scene_until_persisted() {
-        let _guard = env_lock().lock().unwrap();
-        let mut localappdata = LocalAppDataGuard::new();
+        let mut localappdata = crate::test_support::EnvVarGuard::new("LOCALAPPDATA");
 
         let blocked_root = unique_test_path("ninth-virtue-fog-blocked");
         fs::write(&blocked_root, b"blocked").unwrap();
@@ -338,45 +335,11 @@ mod tests {
         fs::remove_dir_all(valid_root).unwrap();
     }
 
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
     fn unique_test_path(prefix: &str) -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("{prefix}-{unique}"))
-    }
-
-    struct LocalAppDataGuard {
-        original: Option<OsString>,
-    }
-
-    impl LocalAppDataGuard {
-        fn new() -> Self {
-            Self {
-                original: std::env::var_os("LOCALAPPDATA"),
-            }
-        }
-
-        fn set(&mut self, value: &Path) {
-            unsafe {
-                std::env::set_var("LOCALAPPDATA", value);
-            }
-        }
-    }
-
-    impl Drop for LocalAppDataGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match self.original.take() {
-                    Some(value) => std::env::set_var("LOCALAPPDATA", value),
-                    None => std::env::remove_var("LOCALAPPDATA"),
-                }
-            }
-        }
     }
 }

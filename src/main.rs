@@ -6,6 +6,8 @@ mod gui;
 mod icon;
 mod memory;
 mod preferences;
+#[cfg(test)]
+mod test_support;
 mod tiles;
 
 fn main() -> eframe::Result {
