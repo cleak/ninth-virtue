@@ -178,17 +178,31 @@ enum GridSource {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalTerrainOrigin {
+    Fixed,
+    Scroll(u8, u8),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LocalMapKey {
+    location: LocationType,
+    z: u8,
+    terrain_origin: LocalTerrainOrigin,
+}
+
 /// Cache identity for the current minimap grid contents.
 ///
-/// Local maps need their own discriminator so switching towns, dungeon floors,
-/// or outdoor layers at the same coordinates still invalidates the cached
-/// terrain texture.
+/// Outdoor views are keyed by the player-centered camera, while local views are
+/// keyed by the terrain buffer they actually upload. That keeps per-step player
+/// movement on fixed local scenes and overworld local fallback on the fast
+/// object-only path until the underlying terrain source changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GridCacheKey {
-    center: (u8, u8),
+    center: Option<(u8, u8)>,
     zoom: usize,
     grid_dims: (usize, usize),
     source: GridSource,
-    local_map: Option<(LocationType, u8)>,
+    local_map: Option<LocalMapKey>,
     outdoor_z: Option<u8>,
 }
 
@@ -453,14 +467,7 @@ pub fn show(
     } else {
         GridSource::Local
     };
-    let grid_key = GridCacheKey {
-        center: (cx, cy),
-        zoom,
-        grid_dims: target_grid_dims,
-        source: grid_source,
-        local_map: (!is_outdoor).then_some((map.location, map.z)),
-        outdoor_z: is_outdoor.then_some(map.z),
-    };
+    let grid_key = grid_cache_key(&map, grid_source, zoom, target_grid_dims);
 
     // `needs_update` only tracks terrain-grid invalidation via
     // `needs_grid_refresh(state.last_grid_key, grid_key)`.
@@ -851,6 +858,35 @@ fn local_scene_grid_dims(map: &MapState) -> (usize, usize) {
         TileGridEncoding::Chunked16x16 | TileGridEncoding::RowMajor32 => (32, 32),
         TileGridEncoding::Dungeon8x8 => (DUNGEON_LEVEL_WIDTH, DUNGEON_LEVEL_HEIGHT),
         TileGridEncoding::Combat11x11Stride32 => (COMBAT_TERRAIN_WIDTH, COMBAT_TERRAIN_HEIGHT),
+    }
+}
+
+fn grid_cache_key(
+    map: &MapState,
+    grid_source: GridSource,
+    zoom: usize,
+    grid_dims: (usize, usize),
+) -> GridCacheKey {
+    GridCacheKey {
+        center: matches!(grid_source, GridSource::Outdoor).then_some((map.x, map.y)),
+        zoom,
+        grid_dims,
+        source: grid_source,
+        local_map: matches!(grid_source, GridSource::Local).then_some(LocalMapKey {
+            location: map.location,
+            z: map.z,
+            terrain_origin: local_terrain_origin(map),
+        }),
+        outdoor_z: matches!(grid_source, GridSource::Outdoor).then_some(map.z),
+    }
+}
+
+fn local_terrain_origin(map: &MapState) -> LocalTerrainOrigin {
+    match map.location.tile_grid_encoding() {
+        TileGridEncoding::Chunked16x16 => LocalTerrainOrigin::Scroll(map.scroll_x, map.scroll_y),
+        TileGridEncoding::RowMajor32
+        | TileGridEncoding::Dungeon8x8
+        | TileGridEncoding::Combat11x11Stride32 => LocalTerrainOrigin::Fixed,
     }
 }
 
@@ -1681,6 +1717,7 @@ fn build_objects_overlay(
     let half_h = grid_h as i32 / 2;
     let outdoor = map.is_outdoor();
     let centered_outdoor = outdoor && matches!(grid_source, GridSource::Outdoor);
+    let local_overworld = outdoor && matches!(grid_source, GridSource::Local);
     let combat = matches!(map.location, LocationType::Combat(_));
 
     for obj in &map.objects {
@@ -1695,6 +1732,14 @@ fn build_objects_overlay(
             let vx = (obj.x as i32 - map.x as i32 + half_w).rem_euclid(256);
             let vy = (obj.y as i32 - map.y as i32 + half_h).rem_euclid(256);
             (vx, vy)
+        } else if local_overworld {
+            // Overworld local fallback is anchored to the live 32x32 window's
+            // top-left scroll origin, not the player center, so wrap relative
+            // to scroll_x/scroll_y when that window crosses the world seam.
+            (
+                (obj.x as i32 - map.scroll_x as i32).rem_euclid(256),
+                (obj.y as i32 - map.scroll_y as i32).rem_euclid(256),
+            )
         } else if combat {
             // Combat actors already use battlefield-local coordinates even when
             // scroll_x/scroll_y still contain overworld chunk state.
@@ -2278,15 +2323,19 @@ mod tests {
     fn grid_source_change_invalidates_cached_grid() {
         assert!(needs_grid_refresh(
             Some(GridCacheKey {
-                center: (42, 43),
+                center: None,
                 zoom: 32,
                 grid_dims: (32, 32),
                 source: GridSource::Local,
-                local_map: Some((LocationType::Town(1), 0)),
+                local_map: Some(LocalMapKey {
+                    location: LocationType::Town(1),
+                    z: 0,
+                    terrain_origin: LocalTerrainOrigin::Fixed,
+                }),
                 outdoor_z: None,
             }),
             GridCacheKey {
-                center: (42, 43),
+                center: Some((42, 43)),
                 zoom: 32,
                 grid_dims: (32, 32),
                 source: GridSource::Outdoor,
@@ -2296,7 +2345,7 @@ mod tests {
         ));
         assert!(!needs_grid_refresh(
             Some(GridCacheKey {
-                center: (42, 43),
+                center: Some((42, 43)),
                 zoom: 32,
                 grid_dims: (32, 32),
                 source: GridSource::Outdoor,
@@ -2304,7 +2353,7 @@ mod tests {
                 outdoor_z: Some(0),
             }),
             GridCacheKey {
-                center: (42, 43),
+                center: Some((42, 43)),
                 zoom: 32,
                 grid_dims: (32, 32),
                 source: GridSource::Outdoor,
@@ -2318,37 +2367,53 @@ mod tests {
     fn local_map_change_invalidates_cached_grid() {
         assert!(needs_grid_refresh(
             Some(GridCacheKey {
-                center: (12, 9),
+                center: None,
                 zoom: 32,
                 grid_dims: (32, 32),
                 source: GridSource::Local,
-                local_map: Some((LocationType::Town(1), 0)),
+                local_map: Some(LocalMapKey {
+                    location: LocationType::Town(1),
+                    z: 0,
+                    terrain_origin: LocalTerrainOrigin::Fixed,
+                }),
                 outdoor_z: None,
             }),
             GridCacheKey {
-                center: (12, 9),
+                center: None,
                 zoom: 32,
                 grid_dims: (32, 32),
                 source: GridSource::Local,
-                local_map: Some((LocationType::Town(2), 0)),
+                local_map: Some(LocalMapKey {
+                    location: LocationType::Town(2),
+                    z: 0,
+                    terrain_origin: LocalTerrainOrigin::Fixed,
+                }),
                 outdoor_z: None,
             },
         ));
         assert!(needs_grid_refresh(
             Some(GridCacheKey {
-                center: (12, 9),
+                center: None,
                 zoom: 32,
                 grid_dims: (32, 32),
                 source: GridSource::Local,
-                local_map: Some((LocationType::Dungeon(33), 0)),
+                local_map: Some(LocalMapKey {
+                    location: LocationType::Dungeon(33),
+                    z: 0,
+                    terrain_origin: LocalTerrainOrigin::Fixed,
+                }),
                 outdoor_z: None,
             }),
             GridCacheKey {
-                center: (12, 9),
+                center: None,
                 zoom: 32,
                 grid_dims: (32, 32),
                 source: GridSource::Local,
-                local_map: Some((LocationType::Dungeon(33), 1)),
+                local_map: Some(LocalMapKey {
+                    location: LocationType::Dungeon(33),
+                    z: 1,
+                    terrain_origin: LocalTerrainOrigin::Fixed,
+                }),
                 outdoor_z: None,
             },
         ));
@@ -2358,7 +2423,7 @@ mod tests {
     fn outdoor_layer_change_invalidates_cached_grid() {
         assert!(needs_grid_refresh(
             Some(GridCacheKey {
-                center: (99, 68),
+                center: Some((99, 68)),
                 zoom: 48,
                 grid_dims: (48, 48),
                 source: GridSource::Outdoor,
@@ -2366,7 +2431,7 @@ mod tests {
                 outdoor_z: Some(0),
             }),
             GridCacheKey {
-                center: (99, 68),
+                center: Some((99, 68)),
                 zoom: 48,
                 grid_dims: (48, 48),
                 source: GridSource::Outdoor,
@@ -2380,7 +2445,7 @@ mod tests {
     fn grid_dims_change_invalidates_cached_grid() {
         assert!(needs_grid_refresh(
             Some(GridCacheKey {
-                center: (99, 68),
+                center: Some((99, 68)),
                 zoom: 48,
                 grid_dims: (48, 48),
                 source: GridSource::Outdoor,
@@ -2388,7 +2453,7 @@ mod tests {
                 outdoor_z: Some(0),
             }),
             GridCacheKey {
-                center: (99, 68),
+                center: Some((99, 68)),
                 zoom: 48,
                 grid_dims: (96, 48),
                 source: GridSource::Outdoor,
@@ -2416,7 +2481,7 @@ mod tests {
             objects: Vec::new(),
         });
         state.last_grid_key = Some(GridCacheKey {
-            center: (1, 2),
+            center: Some((1, 2)),
             zoom: 32,
             grid_dims: (32, 32),
             source: GridSource::Outdoor,
@@ -2741,6 +2806,61 @@ mod tests {
     }
 
     #[test]
+    fn fixed_local_cache_key_ignores_player_motion() {
+        let mut map = MapState {
+            location: LocationType::Town(1),
+            z: 0,
+            x: 10,
+            y: 12,
+            dungeon_facing: None,
+            transport: 0,
+            scroll_x: 90,
+            scroll_y: 100,
+            tiles: [0; 1024],
+            combat_tiles: None,
+            visibility_tiles: None,
+            objects: Vec::new(),
+        };
+
+        let first = grid_cache_key(&map, GridSource::Local, 32, (32, 32));
+        map.x = 11;
+        map.y = 13;
+        let second = grid_cache_key(&map, GridSource::Local, 32, (32, 32));
+
+        assert_eq!(first, second);
+        assert!(!needs_grid_refresh(Some(first), second));
+    }
+
+    #[test]
+    fn overworld_local_cache_key_tracks_scroll_origin() {
+        let mut map = MapState {
+            location: LocationType::Overworld,
+            z: 0,
+            x: 100,
+            y: 105,
+            dungeon_facing: None,
+            transport: 36,
+            scroll_x: 90,
+            scroll_y: 100,
+            tiles: [0; 1024],
+            combat_tiles: None,
+            visibility_tiles: None,
+            objects: Vec::new(),
+        };
+
+        let first = grid_cache_key(&map, GridSource::Local, 32, (32, 32));
+        map.x = 101;
+        let moved_without_scroll = grid_cache_key(&map, GridSource::Local, 32, (32, 32));
+        map.scroll_x = 91;
+        let moved_with_scroll = grid_cache_key(&map, GridSource::Local, 32, (32, 32));
+
+        assert_eq!(first, moved_without_scroll);
+        assert!(!needs_grid_refresh(Some(first), moved_without_scroll));
+        assert_ne!(first, moved_with_scroll);
+        assert!(needs_grid_refresh(Some(first), moved_with_scroll));
+    }
+
+    #[test]
     fn overworld_local_projection_uses_scroll_relative_object_positions() {
         let map = MapState {
             location: LocationType::Overworld,
@@ -2769,6 +2889,38 @@ mod tests {
         assert_eq!(player_tile, [10.0, 5.0]);
         assert_eq!(overlay[5 * 32 + 10], 36);
         assert_eq!(overlay[6 * 32 + 12], 17);
+        assert_eq!(overlay[16 * 32 + 16], 0);
+    }
+
+    #[test]
+    fn overworld_local_projection_wraps_across_world_edge() {
+        let map = MapState {
+            location: LocationType::Overworld,
+            z: 0,
+            x: 2,
+            y: 253,
+            dungeon_facing: None,
+            transport: 36,
+            scroll_x: 250,
+            scroll_y: 248,
+            tiles: [0; 1024],
+            combat_tiles: None,
+            visibility_tiles: None,
+            objects: vec![ObjectEntry {
+                slot: 4,
+                tile: 17,
+                x: 1,
+                y: 250,
+                floor: 0,
+            }],
+        };
+
+        let player_tile = local_scene_player_tile(&map);
+        let overlay = build_objects_overlay(&map, GridSource::Local, player_tile, 32, 32);
+
+        assert_eq!(player_tile, [8.0, 5.0]);
+        assert_eq!(overlay[5 * 32 + 8], 36);
+        assert_eq!(overlay[2 * 32 + 7], 17);
         assert_eq!(overlay[16 * 32 + 16], 0);
     }
 
