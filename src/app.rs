@@ -202,7 +202,9 @@ impl UltimaCompanion {
 
     /// Clear the current attachment state so a confirmed replacement can take over.
     fn prepare_for_attach(&mut self) {
-        if let (Some(attached), Some(state)) = (&self.attached, &self.patch_state) {
+        if let (Some(attached), Some(state)) = (&self.attached, &self.patch_state)
+            && state.owns_installation()
+        {
             injection::remove_patch(&attached.process.memory, state);
         }
         self.patch_state = None;
@@ -316,7 +318,9 @@ impl UltimaCompanion {
 
     fn detach(&mut self) {
         // Remove the code patch before dropping the process handle.
-        if let (Some(attached), Some(state)) = (&self.attached, &self.patch_state) {
+        if let (Some(attached), Some(state)) = (&self.attached, &self.patch_state)
+            && state.owns_installation()
+        {
             injection::remove_patch(&attached.process.memory, state);
         }
         self.patch_state = None;

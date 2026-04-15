@@ -809,8 +809,17 @@ fn local_scene_grid_dims(map: &MapState) -> (usize, usize) {
     }
 }
 
+fn normalize_odd_span(span: usize, max: usize) -> usize {
+    match span.clamp(1, max) {
+        1 => 1,
+        value if value == max && value % 2 == 0 => value - 1,
+        value if value % 2 == 1 => value,
+        value => value + 1,
+    }
+}
+
 fn outdoor_grid_dims_for_panel(panel_size: egui::Vec2, zoom: usize) -> (usize, usize) {
-    let rows = zoom.clamp(ZOOM_MIN, ZOOM_MAX);
+    let rows = normalize_odd_span(zoom.clamp(ZOOM_MIN, ZOOM_MAX), ZOOM_MAX);
     if panel_size.x <= 0.0 || panel_size.y <= 0.0 {
         return (rows, rows);
     }
@@ -821,15 +830,9 @@ fn outdoor_grid_dims_for_panel(panel_size: egui::Vec2, zoom: usize) -> (usize, u
         .saturating_mul(panel_w)
         .checked_div(panel_h)
         .unwrap_or(0);
-    let cols = cols.clamp(1, 256);
-    // Keep the outdoor view on an odd number of columns so the player's tile
-    // lands on the true horizontal center instead of straddling two cells.
-    let cols = match cols {
-        1 => 1,
-        256 => 255,
-        cols if cols % 2 == 1 => cols,
-        cols => cols + 1,
-    };
+    // Keep the outdoor view on odd spans so the player's tile lands on the
+    // true geometric center instead of straddling two cells.
+    let cols = normalize_odd_span(cols, 256);
     (cols, rows)
 }
 
@@ -2113,7 +2116,7 @@ mod tests {
     fn outdoor_grid_dims_expand_to_match_wide_panel() {
         assert_eq!(
             outdoor_grid_dims_for_panel(vec2(400.0, 200.0), 48),
-            (97, 48)
+            (99, 49)
         );
     }
 
@@ -2121,22 +2124,22 @@ mod tests {
     fn outdoor_grid_dims_clamp_before_world_wrap_repeats() {
         assert_eq!(
             outdoor_grid_dims_for_panel(vec2(900.0, 180.0), 64),
-            (255, 64)
+            (255, 65)
         );
     }
 
     #[test]
-    fn outdoor_grid_dims_prefer_odd_columns_for_true_centering() {
+    fn outdoor_grid_dims_prefer_odd_spans_for_true_centering() {
         assert_eq!(
             outdoor_grid_dims_for_panel(vec2(600.0, 200.0), 48),
-            (145, 48)
+            (147, 49)
         );
     }
 
     #[test]
     fn fit_rect_to_grid_adds_side_bars_when_grid_hits_wrap_limit() {
         let bounds = Rect::from_min_size(Pos2::new(0.0, 0.0), vec2(900.0, 180.0));
-        let fitted = fit_rect_to_grid(bounds, (255, 64));
+        let fitted = fit_rect_to_grid(bounds, (255, 63));
 
         assert_eq!(fitted.height(), bounds.height());
         assert!(fitted.width() < bounds.width());

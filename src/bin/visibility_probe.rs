@@ -16,8 +16,11 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 use ninth_virtue::game::injection::{
-    self, VISIBILITY_SNAPSHOT_READY_MARKER, VISIBILITY_SNAPSHOT_READY_OFFSET,
-    VISIBILITY_SNAPSHOT_TILES_OFFSET, VISIBILITY_SNAPSHOT_TOTAL_LEN,
+    self, VISIBILITY_SNAPSHOT_LIGHT_IDX, VISIBILITY_SNAPSHOT_LOCATION_IDX,
+    VISIBILITY_SNAPSHOT_READY_MARKER, VISIBILITY_SNAPSHOT_READY_OFFSET,
+    VISIBILITY_SNAPSHOT_SCROLL_X_IDX, VISIBILITY_SNAPSHOT_SCROLL_Y_IDX,
+    VISIBILITY_SNAPSHOT_TILES_OFFSET, VISIBILITY_SNAPSHOT_TOTAL_LEN, VISIBILITY_SNAPSHOT_X_IDX,
+    VISIBILITY_SNAPSHOT_Y_IDX, VISIBILITY_SNAPSHOT_Z_IDX,
 };
 use ninth_virtue::game::map;
 use ninth_virtue::game::offsets::{
@@ -50,6 +53,12 @@ struct SampleHash {
     app: Option<u64>,
 }
 
+enum SnapshotSample {
+    Missing,
+    Current([u8; VIEWPORT_VISIBILITY_LEN]),
+    Stale([u8; VIEWPORT_VISIBILITY_LEN]),
+}
+
 struct Options {
     pid: Option<u32>,
     count: usize,
@@ -79,7 +88,9 @@ impl<'a> PatchGuard<'a> {
 
 impl Drop for PatchGuard<'_> {
     fn drop(&mut self) {
-        if let Some(patch) = self.patch.take() {
+        if let Some(patch) = self.patch.take()
+            && patch.owns_installation()
+        {
             injection::remove_patch(self.mem, &patch);
         }
     }
@@ -118,21 +129,29 @@ fn main() -> Result<()> {
             ds_addr(scan.dos_base, VIEWPORT_TERRAIN_FALLBACK_GRID),
             VIEWPORT_TERRAIN_FALLBACK_STRIDE,
         )?;
-        let snapshot_tiles = read_snapshot_tiles(mem, snapshot_addr)?;
+        let snapshot_sample = read_snapshot_sample(mem, snapshot_addr, key)?;
         let app_state =
             map::read_map_state_with_visibility_snapshot(mem, scan.dos_base, Some(snapshot_addr))?;
         let app_tiles = app_state.visibility_tiles;
 
-        let source = match (snapshot_tiles.as_ref(), app_tiles.as_ref()) {
-            (Some(snapshot_tiles), Some(app_tiles)) if snapshot_tiles == app_tiles => "snapshot",
-            (None, None) => "none",
-            _ => "mismatch",
+        let source = match (&snapshot_sample, app_tiles.as_ref()) {
+            (SnapshotSample::Current(snapshot_tiles), Some(app_tiles))
+                if snapshot_tiles == app_tiles =>
+            {
+                "snapshot"
+            }
+            (SnapshotSample::Stale(_), None) => "stale",
+            (SnapshotSample::Missing, None) => "none",
+            (SnapshotSample::Stale(_), Some(_)) => "mismatch_stale",
+            (SnapshotSample::Current(_), None) => "mismatch_snapshot_only",
+            (SnapshotSample::Missing, Some(_)) => "mismatch_app_only",
+            (SnapshotSample::Current(_), Some(_)) => "mismatch",
         };
 
         let sample_hash = SampleHash {
             raw_ab02: fnv1a64(&raw_ab02),
             raw_ac64: fnv1a64(&raw_ac64),
-            snapshot: snapshot_tiles.as_ref().map(|tiles| fnv1a64(tiles)),
+            snapshot: snapshot_sample.current_tiles().map(|tiles| fnv1a64(tiles)),
             app: app_tiles.as_ref().map(|tiles| fnv1a64(tiles)),
         };
         unique.insert(sample_hash);
@@ -153,7 +172,7 @@ snap={} app={} source={}",
             raw_ab02[(VIEWPORT_VISIBILITY_HEIGHT / 2) * VIEWPORT_VISIBILITY_WIDTH
                 + VIEWPORT_VISIBILITY_WIDTH / 2],
             sample_hash.raw_ac64,
-            format_optional_tiles(snapshot_tiles.as_ref()),
+            format_snapshot_sample(&snapshot_sample),
             format_optional_tiles(app_tiles.as_ref()),
             source,
         );
@@ -279,15 +298,16 @@ fn read_active_grid(
     Ok(active)
 }
 
-fn read_snapshot_tiles(
+fn read_snapshot_sample(
     mem: &dyn MemoryAccess,
     snapshot_addr: usize,
-) -> Result<Option<[u8; VIEWPORT_VISIBILITY_LEN]>> {
+    key: VisibilityKey,
+) -> Result<SnapshotSample> {
     let mut snapshot = [0u8; VISIBILITY_SNAPSHOT_TOTAL_LEN];
     mem.read_bytes(snapshot_addr, &mut snapshot)?;
 
     if snapshot[VISIBILITY_SNAPSHOT_READY_OFFSET] != VISIBILITY_SNAPSHOT_READY_MARKER {
-        return Ok(None);
+        return Ok(SnapshotSample::Missing);
     }
 
     let mut tiles = [0u8; VIEWPORT_VISIBILITY_LEN];
@@ -295,7 +315,18 @@ fn read_snapshot_tiles(
         &snapshot[VISIBILITY_SNAPSHOT_TILES_OFFSET
             ..VISIBILITY_SNAPSHOT_TILES_OFFSET + VIEWPORT_VISIBILITY_LEN],
     );
-    Ok(Some(tiles))
+    let matches_key = snapshot[VISIBILITY_SNAPSHOT_LOCATION_IDX] == key.location_id
+        && snapshot[VISIBILITY_SNAPSHOT_Z_IDX] == key.z
+        && snapshot[VISIBILITY_SNAPSHOT_X_IDX] == key.x
+        && snapshot[VISIBILITY_SNAPSHOT_Y_IDX] == key.y
+        && snapshot[VISIBILITY_SNAPSHOT_SCROLL_X_IDX] == key.scroll_x
+        && snapshot[VISIBILITY_SNAPSHOT_SCROLL_Y_IDX] == key.scroll_y
+        && snapshot[VISIBILITY_SNAPSHOT_LIGHT_IDX] == key.light;
+    Ok(if matches_key {
+        SnapshotSample::Current(tiles)
+    } else {
+        SnapshotSample::Stale(tiles)
+    })
 }
 
 fn fnv1a64(bytes: &[u8]) -> u64 {
@@ -321,6 +352,23 @@ fn format_optional_tiles(tiles: Option<&[u8; VIEWPORT_VISIBILITY_LEN]>) -> Strin
                 + VIEWPORT_VISIBILITY_WIDTH / 2]
         ),
         None => "none".to_string(),
+    }
+}
+
+impl SnapshotSample {
+    fn current_tiles(&self) -> Option<&[u8; VIEWPORT_VISIBILITY_LEN]> {
+        match self {
+            Self::Current(tiles) => Some(tiles),
+            Self::Missing | Self::Stale(_) => None,
+        }
+    }
+}
+
+fn format_snapshot_sample(sample: &SnapshotSample) -> String {
+    match sample {
+        SnapshotSample::Missing => "none".to_string(),
+        SnapshotSample::Current(tiles) => format_optional_tiles(Some(tiles)),
+        SnapshotSample::Stale(tiles) => format!("stale:{}", format_optional_tiles(Some(tiles))),
     }
 }
 

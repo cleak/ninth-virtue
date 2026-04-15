@@ -253,7 +253,7 @@ pub struct ObjectEntry {
     pub floor: u8,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct VisibilityWindowKey {
     location_id: u8,
     z: u8,
@@ -261,6 +261,20 @@ struct VisibilityWindowKey {
     y: u8,
     scroll_x: u8,
     scroll_y: u8,
+}
+
+fn read_visibility_window_key(
+    mem: &dyn MemoryAccess,
+    dos_base: usize,
+) -> Result<VisibilityWindowKey> {
+    Ok(VisibilityWindowKey {
+        location_id: mem.read_u8(inv_addr(dos_base, MAP_LOCATION))?,
+        z: mem.read_u8(inv_addr(dos_base, MAP_Z))?,
+        x: mem.read_u8(inv_addr(dos_base, MAP_X))?,
+        y: mem.read_u8(inv_addr(dos_base, MAP_Y))?,
+        scroll_x: mem.read_u8(inv_addr(dos_base, MAP_SCROLL_X))?,
+        scroll_y: mem.read_u8(inv_addr(dos_base, MAP_SCROLL_Y))?,
+    })
 }
 
 /// Read the current map state from DOSBox memory.
@@ -324,17 +338,30 @@ pub fn read_map_state_with_visibility_snapshot(
         scroll_x,
         scroll_y,
     };
+    let visibility_light = mem.read_u8(inv_addr(dos_base, LIGHT_INTENSITY)).ok();
 
     let visibility_tiles = match location {
         LocationType::Overworld
         | LocationType::Town(_)
         | LocationType::Dwelling(_)
         | LocationType::Castle(_)
-        | LocationType::Keep(_) => {
-            read_visibility_window(mem, dos_base, visibility_snapshot_addr, visibility_key)
+        | LocationType::Keep(_) => read_visibility_window(
+            mem,
+            dos_base,
+            visibility_snapshot_addr,
+            visibility_key,
+            visibility_light,
+        )
+        .ok()
+        .flatten()
+        .filter(|_| {
+            read_visibility_window_key(mem, dos_base)
                 .ok()
-                .flatten()
-        }
+                .zip(mem.read_u8(inv_addr(dos_base, LIGHT_INTENSITY)).ok())
+                .is_some_and(|(current_key, current_light)| {
+                    current_key == visibility_key && Some(current_light) == visibility_light
+                })
+        }),
         LocationType::Dungeon(_) | LocationType::Combat(_) => None,
     };
 
@@ -356,11 +383,21 @@ pub fn read_map_state_with_visibility_snapshot(
     })
 }
 
+/// Read the current 11x11 visibility window.
+///
+/// When `visibility_snapshot_addr` is present, `read_visibility_window`
+/// retries up to `SNAPSHOT_RETRY_COUNT` times with
+/// `SNAPSHOT_RETRY_DELAY_MS` sleeps between attempts while waiting for a
+/// snapshot whose metadata matches the current frame. That can block the
+/// caller briefly, but it avoids trusting the asynchronously mutating
+/// scratch buffer when the synchronized hook is installed and instead
+/// returns `None` until a matching post-render snapshot arrives.
 fn read_visibility_window(
     mem: &dyn MemoryAccess,
     dos_base: usize,
     visibility_snapshot_addr: Option<usize>,
     key: VisibilityWindowKey,
+    light: Option<u8>,
 ) -> Result<Option<[u8; VIEWPORT_VISIBILITY_LEN]>> {
     const VISIBILITY_SAMPLE_COUNT: usize = 5;
     const VISIBILITY_HIDDEN_TILE: u8 = 0xFF;
@@ -368,7 +405,7 @@ fn read_visibility_window(
     const SNAPSHOT_RETRY_DELAY_MS: u64 = 5;
 
     if let Some(snapshot_addr) = visibility_snapshot_addr {
-        let light = mem.read_u8(inv_addr(dos_base, LIGHT_INTENSITY))?;
+        let light = light.ok_or_else(|| anyhow::anyhow!("reading light intensity failed"))?;
         for attempt in 0..SNAPSHOT_RETRY_COUNT {
             if let Some(snapshot) = read_stable_visibility_window(mem, snapshot_addr, key, light)? {
                 return Ok(Some(snapshot));
@@ -604,6 +641,41 @@ mod tests {
             }
 
             self.base.read_bytes(addr, buf)
+        }
+
+        fn write_bytes(&self, addr: usize, data: &[u8]) -> Result<()> {
+            self.base.write_bytes(addr, data)
+        }
+    }
+
+    struct SnapshotKeyDriftMemory {
+        base: MockMemory,
+        snapshot_addr: usize,
+        drifted: Cell<bool>,
+    }
+
+    impl SnapshotKeyDriftMemory {
+        fn new(size: usize, snapshot_addr: usize) -> Self {
+            Self {
+                base: MockMemory::new(size),
+                snapshot_addr,
+                drifted: Cell::new(false),
+            }
+        }
+    }
+
+    impl MemoryAccess for SnapshotKeyDriftMemory {
+        fn read_bytes(&self, addr: usize, buf: &mut [u8]) -> Result<()> {
+            self.base.read_bytes(addr, buf)?;
+            if addr == self.snapshot_addr
+                && buf.len() == VISIBILITY_SNAPSHOT_TOTAL_LEN
+                && !self.drifted.replace(true)
+            {
+                self.base
+                    .write_u8(SAVE_BASE + MAP_X, 11)
+                    .expect("map key drift write should succeed");
+            }
+            Ok(())
         }
 
         fn write_bytes(&self, addr: usize, data: &[u8]) -> Result<()> {
@@ -941,6 +1013,47 @@ mod tests {
             0x22
         );
         assert_eq!(mock.snapshot_reads.get(), 3);
+    }
+
+    #[test]
+    fn visibility_snapshot_is_dropped_if_map_key_changes_after_read() {
+        let snapshot_addr = 0x2F000;
+        let mock = SnapshotKeyDriftMemory::new(
+            snapshot_addr + VISIBILITY_SNAPSHOT_TOTAL_LEN + 0x100,
+            snapshot_addr,
+        );
+
+        let base = SAVE_BASE;
+        mock.write_u8(base + MAP_LOCATION, 2).unwrap();
+        mock.write_u8(base + MAP_Z, 0).unwrap();
+        mock.write_u8(base + MAP_X, 10).unwrap();
+        mock.write_u8(base + MAP_Y, 12).unwrap();
+        mock.write_u8(base + MAP_TRANSPORT, 0).unwrap();
+        mock.write_u8(base + MAP_SCROLL_X, 8).unwrap();
+        mock.write_u8(base + MAP_SCROLL_Y, 9).unwrap();
+        mock.write_u8(base + LIGHT_INTENSITY, 0x0A).unwrap();
+
+        for i in 0..MAP_TILES_LEN {
+            mock.write_u8(base + MAP_TILES + i, 0x05).unwrap();
+        }
+
+        let mut snapshot = [0u8; VISIBILITY_SNAPSHOT_TOTAL_LEN];
+        snapshot[VISIBILITY_SNAPSHOT_LOCATION_IDX] = 2;
+        snapshot[VISIBILITY_SNAPSHOT_Z_IDX] = 0;
+        snapshot[VISIBILITY_SNAPSHOT_X_IDX] = 10;
+        snapshot[VISIBILITY_SNAPSHOT_Y_IDX] = 12;
+        snapshot[VISIBILITY_SNAPSHOT_SCROLL_X_IDX] = 8;
+        snapshot[VISIBILITY_SNAPSHOT_SCROLL_Y_IDX] = 9;
+        snapshot[VISIBILITY_SNAPSHOT_LIGHT_IDX] = 0x0A;
+        snapshot[VISIBILITY_SNAPSHOT_TILES_OFFSET] = 0x11;
+        snapshot[VISIBILITY_SNAPSHOT_READY_OFFSET] = VISIBILITY_SNAPSHOT_READY_MARKER;
+        mock.base.set_bytes(snapshot_addr, &snapshot);
+
+        let state = read_map_state_with_visibility_snapshot(&mock, 0, Some(snapshot_addr)).unwrap();
+        assert!(
+            state.visibility_tiles.is_none(),
+            "visibility should be dropped when the live map key advances during the wait path"
+        );
     }
 
     #[test]
