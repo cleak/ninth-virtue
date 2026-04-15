@@ -485,7 +485,13 @@ pub fn show(
                 extract_local_scene_grid(&map)
             };
 
-        let objects_data = build_objects_overlay(&map, grid_w as usize, grid_h as usize);
+        let objects_data = build_objects_overlay(
+            &map,
+            grid_source,
+            player_tile,
+            grid_w as usize,
+            grid_h as usize,
+        );
         let lowpass_data = build_lowpass_map(
             &grid_data,
             &objects_data,
@@ -515,7 +521,13 @@ pub fn show(
             (gpu.grid_dims, gpu.player_tile)
         };
         let fog_data = build_fog_texture(state, &map, grid_source, grid_dims);
-        let objects_data = build_objects_overlay(&map, grid_dims.0 as usize, grid_dims.1 as usize);
+        let objects_data = build_objects_overlay(
+            &map,
+            grid_source,
+            player_tile,
+            grid_dims.0 as usize,
+            grid_dims.1 as usize,
+        );
 
         let mut gpu = state.gpu.lock().unwrap();
         if gpu.objects_data != objects_data {
@@ -1650,8 +1662,16 @@ fn extract_combat_grid(tiles: &[u8; COMBAT_TERRAIN_LEN]) -> Vec<u8> {
 /// Build an object overlay grid (same dimensions as the tile grid).
 ///
 /// Each cell is 0 (no object) or the object's tile byte. The shader adds 256
-/// to get the animated-page sprite from the atlas.
-fn build_objects_overlay(map: &MapState, grid_w: usize, grid_h: usize) -> Vec<u8> {
+/// to get the animated-page sprite from the atlas. Coordinates are projected
+/// using the active grid source so overworld local fallback stays aligned with
+/// the terrain and player marker.
+fn build_objects_overlay(
+    map: &MapState,
+    grid_source: GridSource,
+    player_tile: [f32; 2],
+    grid_w: usize,
+    grid_h: usize,
+) -> Vec<u8> {
     debug_assert!(
         !matches!(map.location, LocationType::Dungeon(_)),
         "dungeon walking maps use the abstract painter path instead of sprite overlays"
@@ -1660,6 +1680,7 @@ fn build_objects_overlay(map: &MapState, grid_w: usize, grid_h: usize) -> Vec<u8
     let half_w = grid_w as i32 / 2;
     let half_h = grid_h as i32 / 2;
     let outdoor = map.is_outdoor();
+    let centered_outdoor = outdoor && matches!(grid_source, GridSource::Outdoor);
     let combat = matches!(map.location, LocationType::Combat(_));
 
     for obj in &map.objects {
@@ -1670,7 +1691,7 @@ fn build_objects_overlay(map: &MapState, grid_w: usize, grid_h: usize) -> Vec<u8
             continue;
         }
 
-        let (gx, gy) = if outdoor {
+        let (gx, gy) = if centered_outdoor {
             let vx = (obj.x as i32 - map.x as i32 + half_w).rem_euclid(256);
             let vy = (obj.y as i32 - map.y as i32 + half_h).rem_euclid(256);
             (vx, vy)
@@ -1694,13 +1715,9 @@ fn build_objects_overlay(map: &MapState, grid_w: usize, grid_h: usize) -> Vec<u8
     // authoritative player position. Re-anchor that sprite to the player tile
     // so the transport/avatar art stays in sync with the marker.
     if let Some(tile) = map.player_avatar_tile() {
-        let (gx, gy) = if outdoor {
-            (
-                (grid_w as f32 / 2.0).floor() as usize,
-                (grid_h as f32 / 2.0).floor() as usize,
-            )
+        let (gx, gy) = if centered_outdoor {
+            (grid_w / 2, grid_h / 2)
         } else {
-            let player_tile = local_scene_player_tile(map);
             (
                 player_tile[0].floor() as usize,
                 player_tile[1].floor() as usize,
@@ -2600,7 +2617,7 @@ mod tests {
             ],
         };
 
-        let overlay = build_objects_overlay(&map, 32, 32);
+        let overlay = build_objects_overlay(&map, GridSource::Local, [4.0, 5.0], 32, 32);
         assert_eq!(overlay[5 * 32 + 4], 7);
         assert_eq!(overlay[7 * 32 + 6], 0);
     }
@@ -2628,7 +2645,7 @@ mod tests {
             }],
         };
 
-        let overlay = build_objects_overlay(&map, 11, 11);
+        let overlay = build_objects_overlay(&map, GridSource::Local, [4.0, 10.0], 11, 11);
         assert_eq!(overlay[9 * 11 + 6], 11);
     }
 
@@ -2655,7 +2672,7 @@ mod tests {
             }],
         };
 
-        let overlay = build_objects_overlay(&map, 96, 48);
+        let overlay = build_objects_overlay(&map, GridSource::Outdoor, [48.0, 24.0], 96, 48);
         assert_eq!(overlay[24 * 96 + 48], 17);
     }
 
@@ -2691,13 +2708,13 @@ mod tests {
             ],
         };
 
-        let overlay = build_objects_overlay(&map, 32, 32);
+        let overlay = build_objects_overlay(&map, GridSource::Local, [5.0, 5.0], 32, 32);
         assert_eq!(overlay[5 * 32 + 5], 7);
         assert_eq!(overlay[5 * 32 + 6], 11);
     }
 
     #[test]
-    fn object_overlay_prefers_transport_tile_for_party_avatar() {
+    fn outdoor_object_overlay_prefers_transport_tile_for_party_avatar() {
         let map = MapState {
             location: LocationType::Overworld,
             z: 0,
@@ -2719,8 +2736,40 @@ mod tests {
             }],
         };
 
-        let overlay = build_objects_overlay(&map, 11, 11);
+        let overlay = build_objects_overlay(&map, GridSource::Outdoor, [5.0, 5.0], 11, 11);
         assert_eq!(overlay[5 * 11 + 5], 36);
+    }
+
+    #[test]
+    fn overworld_local_projection_uses_scroll_relative_object_positions() {
+        let map = MapState {
+            location: LocationType::Overworld,
+            z: 0,
+            x: 100,
+            y: 105,
+            dungeon_facing: None,
+            transport: 36,
+            scroll_x: 90,
+            scroll_y: 100,
+            tiles: [0; 1024],
+            combat_tiles: None,
+            visibility_tiles: None,
+            objects: vec![ObjectEntry {
+                slot: 4,
+                tile: 17,
+                x: 102,
+                y: 106,
+                floor: 0,
+            }],
+        };
+
+        let player_tile = local_scene_player_tile(&map);
+        let overlay = build_objects_overlay(&map, GridSource::Local, player_tile, 32, 32);
+
+        assert_eq!(player_tile, [10.0, 5.0]);
+        assert_eq!(overlay[5 * 32 + 10], 36);
+        assert_eq!(overlay[6 * 32 + 12], 17);
+        assert_eq!(overlay[16 * 32 + 16], 0);
     }
 
     #[test]
