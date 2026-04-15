@@ -3,6 +3,7 @@
 //! Captures the current map/light state plus the candidate runtime buffers
 //! we care about during the passive-validation phase:
 //! - `DS:0xAB02` 11x11 viewport scratch grid (32-byte stride)
+//! - `DS:0xAC64` 11x11 terrain fallback grid (16-byte stride)
 //! - `DS:0xAD14` combat terrain scratch grid (32-byte stride)
 //! - `DS:0x595A` dungeon terrain buffer (8 floors x 8x8 cells)
 //! - `save+MAP_TILES` current 32x32 live terrain window
@@ -27,6 +28,14 @@ use ninth_virtue::game::offsets::{
 use ninth_virtue::memory::access::MemoryAccess;
 use ninth_virtue::memory::{process, scanner};
 
+const VISIBILITY_DIRTY_FLAG: usize = 0x24E6;
+const VIEWPORT_DRAWN_FLAG: usize = 0x5891;
+const VIEWPORT_REDRAW_FLAG: usize = 0x58A4;
+const VIEWPORT_TERRAIN_FALLBACK_GRID: usize = 0xAC64;
+const VIEWPORT_TERRAIN_FALLBACK_STRIDE: usize = 16;
+const MOONGATE_ANIM_PHASE: usize = 0x5887;
+const MOONGATE_VISIBILITY_PHASE: usize = 0x2186;
+
 struct Options {
     pid: Option<u32>,
     out_dir: PathBuf,
@@ -43,6 +52,11 @@ struct SnapshotSummary<'a> {
     light_intensity: u8,
     light_spell_dur: u8,
     torch_dur: u8,
+    visibility_dirty_flag: u8,
+    viewport_drawn_flag: u8,
+    viewport_redraw_flag: u8,
+    moongate_anim_phase: u8,
+    moongate_visibility_phase: u8,
 }
 
 fn main() -> Result<()> {
@@ -65,11 +79,22 @@ fn main() -> Result<()> {
     let torch_dur = mem.read_u8(inv_addr(scan.dos_base, TORCH_DUR))?;
     let scroll_x = mem.read_u8(inv_addr(scan.dos_base, MAP_SCROLL_X))?;
     let scroll_y = mem.read_u8(inv_addr(scan.dos_base, MAP_SCROLL_Y))?;
+    let visibility_dirty_flag = mem.read_u8(ds_addr(scan.dos_base, VISIBILITY_DIRTY_FLAG))?;
+    let viewport_drawn_flag = mem.read_u8(ds_addr(scan.dos_base, VIEWPORT_DRAWN_FLAG))?;
+    let viewport_redraw_flag = mem.read_u8(ds_addr(scan.dos_base, VIEWPORT_REDRAW_FLAG))?;
+    let moongate_anim_phase = mem.read_u8(ds_addr(scan.dos_base, MOONGATE_ANIM_PHASE))?;
+    let moongate_visibility_phase =
+        mem.read_u8(ds_addr(scan.dos_base, MOONGATE_VISIBILITY_PHASE))?;
 
     let viewport_scratch = read_bytes(
         mem,
         ds_addr(scan.dos_base, VIEWPORT_VISIBILITY_GRID),
         VIEWPORT_VISIBILITY_STRIDE * VIEWPORT_VISIBILITY_HEIGHT,
+    )?;
+    let viewport_fallback = read_bytes(
+        mem,
+        ds_addr(scan.dos_base, VIEWPORT_TERRAIN_FALLBACK_GRID),
+        VIEWPORT_TERRAIN_FALLBACK_STRIDE * VIEWPORT_VISIBILITY_HEIGHT,
     )?;
     let combat_scratch = read_bytes(
         mem,
@@ -95,6 +120,11 @@ fn main() -> Result<()> {
             light_intensity,
             light_spell_dur,
             torch_dur,
+            visibility_dirty_flag,
+            viewport_drawn_flag,
+            viewport_redraw_flag,
+            moongate_anim_phase,
+            moongate_visibility_phase,
         }),
     )?;
     write_text(
@@ -118,6 +148,16 @@ fn main() -> Result<()> {
         ),
     )?;
     write_text(
+        &output_dir.join("viewport-ac64.txt"),
+        &format_strided_grid(
+            "DS:0xAC64 terrain fallback",
+            &viewport_fallback,
+            VIEWPORT_VISIBILITY_WIDTH,
+            VIEWPORT_TERRAIN_FALLBACK_STRIDE,
+            VIEWPORT_VISIBILITY_HEIGHT,
+        ),
+    )?;
+    write_text(
         &output_dir.join("map-tiles-32x32.txt"),
         &format_dense_grid("save+MAP_TILES 32x32", &live_tiles, 32),
     )?;
@@ -130,6 +170,8 @@ fn main() -> Result<()> {
         .with_context(|| format!("writing {}", output_dir.join("viewport-ab02.bin").display()))?;
     fs::write(output_dir.join("combat-ad14.bin"), &combat_scratch)
         .with_context(|| format!("writing {}", output_dir.join("combat-ad14.bin").display()))?;
+    fs::write(output_dir.join("viewport-ac64.bin"), &viewport_fallback)
+        .with_context(|| format!("writing {}", output_dir.join("viewport-ac64.bin").display()))?;
     fs::write(output_dir.join("map-tiles-32x32.bin"), &live_tiles).with_context(|| {
         format!(
             "writing {}",
@@ -270,6 +312,31 @@ fn build_summary(summary: &SnapshotSummary<'_>) -> String {
         "Torch dur (save+0x301): 0x{:02X} ({})",
         summary.torch_dur, summary.torch_dur
     );
+    let _ = writeln!(
+        out,
+        "Visibility dirty flag (DS:0x24E6): 0x{:02X} ({})",
+        summary.visibility_dirty_flag, summary.visibility_dirty_flag
+    );
+    let _ = writeln!(
+        out,
+        "Viewport drawn flag (DS:0x5891): 0x{:02X} ({})",
+        summary.viewport_drawn_flag, summary.viewport_drawn_flag
+    );
+    let _ = writeln!(
+        out,
+        "Viewport redraw flag (DS:0x58A4): 0x{:02X} ({})",
+        summary.viewport_redraw_flag, summary.viewport_redraw_flag
+    );
+    let _ = writeln!(
+        out,
+        "Moongate anim phase (DS:0x5887): 0x{:02X} ({})",
+        summary.moongate_anim_phase, summary.moongate_anim_phase
+    );
+    let _ = writeln!(
+        out,
+        "Moongate visibility phase (DS:0x2186): 0x{:02X} ({})",
+        summary.moongate_visibility_phase, summary.moongate_visibility_phase
+    );
     let _ = writeln!(out, "Scene notes:");
     match summary.map_state.location {
         LocationType::Combat(_) => {
@@ -287,7 +354,7 @@ fn build_summary(summary: &SnapshotSummary<'_>) -> String {
         _ => {
             let _ = writeln!(
                 out,
-                "- Outdoor/interior scene active; compare DS:0xAB02 with live 2D visibility."
+                "- Outdoor/interior scene active; compare DS:0xAB02 plus DS:0xAC64 with live 2D visibility."
             );
         }
     }
