@@ -34,7 +34,7 @@ use ninth_virtue::memory::{process, scanner};
 const VIEWPORT_TERRAIN_FALLBACK_GRID: usize = 0xAC64;
 const VIEWPORT_TERRAIN_FALLBACK_STRIDE: usize = 16;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct VisibilityKey {
     location_id: u8,
     z: u8,
@@ -46,10 +46,24 @@ struct VisibilityKey {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum SampleSource {
+    Snapshot,
+    Stale,
+    None,
+    MismatchStale,
+    MismatchSnapshotOnly,
+    MismatchAppOnly,
+    Mismatch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct SampleHash {
+    key: VisibilityKey,
+    source: SampleSource,
     raw_ab02: u64,
     raw_ac64: u64,
     snapshot: Option<u64>,
+    stale_snapshot: Option<u64>,
     app: Option<u64>,
 }
 
@@ -134,24 +148,15 @@ fn main() -> Result<()> {
             map::read_map_state_with_visibility_snapshot(mem, scan.dos_base, Some(snapshot_addr))?;
         let app_tiles = app_state.visibility_tiles;
 
-        let source = match (&snapshot_sample, app_tiles.as_ref()) {
-            (SnapshotSample::Current(snapshot_tiles), Some(app_tiles))
-                if snapshot_tiles == app_tiles =>
-            {
-                "snapshot"
-            }
-            (SnapshotSample::Stale(_), None) => "stale",
-            (SnapshotSample::Missing, None) => "none",
-            (SnapshotSample::Stale(_), Some(_)) => "mismatch_stale",
-            (SnapshotSample::Current(_), None) => "mismatch_snapshot_only",
-            (SnapshotSample::Missing, Some(_)) => "mismatch_app_only",
-            (SnapshotSample::Current(_), Some(_)) => "mismatch",
-        };
+        let source = classify_sample(&snapshot_sample, app_tiles.as_ref());
 
         let sample_hash = SampleHash {
+            key,
+            source,
             raw_ab02: fnv1a64(&raw_ab02),
             raw_ac64: fnv1a64(&raw_ac64),
             snapshot: snapshot_sample.current_tiles().map(|tiles| fnv1a64(tiles)),
+            stale_snapshot: snapshot_sample.stale_tiles().map(|tiles| fnv1a64(tiles)),
             app: app_tiles.as_ref().map(|tiles| fnv1a64(tiles)),
         };
         unique.insert(sample_hash);
@@ -174,7 +179,7 @@ snap={} app={} source={}",
             sample_hash.raw_ac64,
             format_snapshot_sample(&snapshot_sample),
             format_optional_tiles(app_tiles.as_ref()),
-            source,
+            format_sample_source(source),
         );
 
         if idx + 1 < options.count {
@@ -190,14 +195,43 @@ snap={} app={} source={}",
     );
     for (idx, sample) in unique.iter().enumerate() {
         println!(
-            "  [{idx}] raw_ab02={:016X} raw_ac64={:016X} snapshot={} app={}",
+            "  [{idx}] loc={:02X} z={:02X} pos=({}, {}) scroll=({}, {}) light={:02X} \
+source={} raw_ab02={:016X} raw_ac64={:016X} snapshot={} stale={} app={}",
+            sample.key.location_id,
+            sample.key.z,
+            sample.key.x,
+            sample.key.y,
+            sample.key.scroll_x,
+            sample.key.scroll_y,
+            sample.key.light,
+            format_sample_source(sample.source),
             sample.raw_ab02,
             sample.raw_ac64,
             format_optional_hash(sample.snapshot),
+            format_optional_hash(sample.stale_snapshot),
             format_optional_hash(sample.app),
         );
     }
     Ok(())
+}
+
+fn classify_sample(
+    snapshot_sample: &SnapshotSample,
+    app_tiles: Option<&[u8; VIEWPORT_VISIBILITY_LEN]>,
+) -> SampleSource {
+    match (snapshot_sample, app_tiles) {
+        (SnapshotSample::Current(snapshot_tiles), Some(app_tiles))
+            if snapshot_tiles == app_tiles =>
+        {
+            SampleSource::Snapshot
+        }
+        (SnapshotSample::Stale(_), None) => SampleSource::Stale,
+        (SnapshotSample::Missing, None) => SampleSource::None,
+        (SnapshotSample::Stale(_), Some(_)) => SampleSource::MismatchStale,
+        (SnapshotSample::Current(_), None) => SampleSource::MismatchSnapshotOnly,
+        (SnapshotSample::Missing, Some(_)) => SampleSource::MismatchAppOnly,
+        (SnapshotSample::Current(_), Some(_)) => SampleSource::Mismatch,
+    }
 }
 
 fn parse_args() -> Result<Options> {
@@ -362,6 +396,13 @@ impl SnapshotSample {
             Self::Missing | Self::Stale(_) => None,
         }
     }
+
+    fn stale_tiles(&self) -> Option<&[u8; VIEWPORT_VISIBILITY_LEN]> {
+        match self {
+            Self::Stale(tiles) => Some(tiles),
+            Self::Missing | Self::Current(_) => None,
+        }
+    }
 }
 
 fn format_snapshot_sample(sample: &SnapshotSample) -> String {
@@ -372,7 +413,74 @@ fn format_snapshot_sample(sample: &SnapshotSample) -> String {
     }
 }
 
+fn format_sample_source(source: SampleSource) -> &'static str {
+    match source {
+        SampleSource::Snapshot => "snapshot",
+        SampleSource::Stale => "stale",
+        SampleSource::None => "none",
+        SampleSource::MismatchStale => "mismatch_stale",
+        SampleSource::MismatchSnapshotOnly => "mismatch_snapshot_only",
+        SampleSource::MismatchAppOnly => "mismatch_app_only",
+        SampleSource::Mismatch => "mismatch",
+    }
+}
+
 fn format_optional_hash(hash: Option<u64>) -> String {
     hash.map(|hash| format!("{hash:016X}"))
         .unwrap_or_else(|| "none".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_sample_distinguishes_stale_from_missing() {
+        let visible = [0x11; VIEWPORT_VISIBILITY_LEN];
+        assert_eq!(
+            classify_sample(&SnapshotSample::Missing, None),
+            SampleSource::None
+        );
+        assert_eq!(
+            classify_sample(&SnapshotSample::Stale(visible), None),
+            SampleSource::Stale
+        );
+    }
+
+    #[test]
+    fn sample_hash_distinguishes_same_tiles_with_different_keys_and_stale_payloads() {
+        let key_a = VisibilityKey {
+            location_id: 0,
+            z: 0,
+            x: 10,
+            y: 12,
+            scroll_x: 8,
+            scroll_y: 9,
+            light: 0x0A,
+        };
+        let key_b = VisibilityKey { x: 11, ..key_a };
+        let stale_a = [0x11; VIEWPORT_VISIBILITY_LEN];
+        let stale_b = [0x22; VIEWPORT_VISIBILITY_LEN];
+
+        let sample_a = SampleHash {
+            key: key_a,
+            source: SampleSource::Stale,
+            raw_ab02: 1,
+            raw_ac64: 2,
+            snapshot: None,
+            stale_snapshot: Some(fnv1a64(&stale_a)),
+            app: None,
+        };
+        let sample_b = SampleHash {
+            key: key_b,
+            source: SampleSource::Stale,
+            raw_ab02: 1,
+            raw_ac64: 2,
+            snapshot: None,
+            stale_snapshot: Some(fnv1a64(&stale_b)),
+            app: None,
+        };
+
+        assert_ne!(sample_a, sample_b);
+    }
 }

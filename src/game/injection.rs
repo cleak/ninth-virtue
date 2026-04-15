@@ -128,13 +128,21 @@ pub struct PatchState {
     owns_installation: bool,
     /// Absolute host address of the dirty flag byte.
     flag_addr: usize,
-    /// Absolute host address of the compact visibility snapshot body.
+    /// Absolute host address of the visibility snapshot buffer start.
+    ///
+    /// Callers should read `VISIBILITY_SNAPSHOT_TOTAL_LEN` bytes from this
+    /// address and apply `VISIBILITY_SNAPSHOT_TILES_OFFSET` only once when
+    /// they want the 11x11 tile body.
     visibility_snapshot_addr: usize,
 }
 
 impl PatchState {
-    /// Absolute host address of the snapshot body written after each resident
-    /// `0x5910` call. The ready marker byte immediately follows the body.
+    /// Absolute host address of the visibility snapshot buffer start written
+    /// after each resident `0x5910` call.
+    ///
+    /// The buffer contains metadata, the 11x11 tiles, and the trailing ready
+    /// marker. The ready byte lives at
+    /// `visibility_snapshot_addr + VISIBILITY_SNAPSHOT_READY_OFFSET`.
     pub fn visibility_snapshot_addr(&self) -> usize {
         self.visibility_snapshot_addr
     }
