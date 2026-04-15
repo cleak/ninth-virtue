@@ -11,7 +11,7 @@ use crate::game::map::{CardinalDirection, LocationType, MapState, ObjectEntry, T
 use crate::game::offsets::{
     COMBAT_TERRAIN_HEIGHT, COMBAT_TERRAIN_LEN, COMBAT_TERRAIN_STRIDE, COMBAT_TERRAIN_WIDTH,
     DUNGEON_LEVEL_HEIGHT, DUNGEON_LEVEL_LEN, DUNGEON_LEVEL_WIDTH, VIEWPORT_VISIBILITY_HEIGHT,
-    VIEWPORT_VISIBILITY_WIDTH,
+    VIEWPORT_VISIBILITY_LEN, VIEWPORT_VISIBILITY_WIDTH,
 };
 use crate::game::world_map::{WorldLabelCategory, WorldLocation, WorldMap};
 use crate::tiles::atlas::{TILE_COUNT, TILE_SIZE, TileAtlas};
@@ -216,6 +216,8 @@ pub struct MinimapState {
     show_labels: bool,
     label_filters: LabelFilters,
     last_grid_key: Option<GridCacheKey>,
+    last_stable_visibility_scene: Option<FogScene>,
+    last_stable_visibility_tiles: Option<[u8; VIEWPORT_VISIBILITY_LEN]>,
     dungeon_primary_view: DungeonPrimaryView,
     show_dungeon_corner_view: bool,
     fog: FogState,
@@ -246,6 +248,8 @@ impl Default for MinimapState {
             show_labels: true,
             label_filters: LabelFilters::default(),
             last_grid_key: None,
+            last_stable_visibility_scene: None,
+            last_stable_visibility_tiles: None,
             dungeon_primary_view: DungeonPrimaryView::default(),
             show_dungeon_corner_view: true,
             fog: FogState::new(),
@@ -370,6 +374,8 @@ impl MinimapState {
         self.raw_atlas = None;
         self.tile_lowpass_lut = None;
         self.last_grid_key = None;
+        self.last_stable_visibility_scene = None;
+        self.last_stable_visibility_tiles = None;
         self.cancel_fog_reset_confirmation();
         self.fog_reset_error = None;
 
@@ -901,9 +907,20 @@ fn build_fog_texture(
     };
 
     let fog_enabled = state.fog_enabled();
+    let (visibility_tiles, persist_visible_tiles) = if let Some(tiles) = map.visibility_tiles {
+        state.last_stable_visibility_scene = Some(scene);
+        state.last_stable_visibility_tiles = Some(tiles);
+        (Some(tiles), true)
+    } else if state.last_stable_visibility_scene == Some(scene) {
+        (state.last_stable_visibility_tiles, false)
+    } else {
+        (None, false)
+    };
     let projection = FogProjection::new(map, scene, grid_source, grid_dims);
-    let visible_scene_coords = projection.visible_scene_coords();
-    state.fog.record_visible_tiles(scene, &visible_scene_coords);
+    let visible_scene_coords = projection.visible_scene_coords(visibility_tiles.as_ref());
+    if persist_visible_tiles {
+        state.fog.record_visible_tiles(scene, &visible_scene_coords);
+    }
     let explored = state.fog.scene_data(scene);
     let mut fog = vec![FOG_VISIBILITY_UNSEEN; len];
     let (scene_w, _) = scene.dimensions();
@@ -955,8 +972,11 @@ impl<'a> FogProjection<'a> {
         }
     }
 
-    fn visible_scene_coords(&self) -> Vec<(usize, usize)> {
-        let Some(tiles) = self.map.visibility_tiles.as_ref() else {
+    fn visible_scene_coords(
+        &self,
+        visibility_tiles: Option<&[u8; VIEWPORT_VISIBILITY_LEN]>,
+    ) -> Vec<(usize, usize)> {
+        let Some(tiles) = visibility_tiles else {
             return Vec::new();
         };
 
@@ -2362,6 +2382,8 @@ mod tests {
         assert!(state.map.is_none());
         assert!(state.raw_atlas.is_none());
         assert!(state.last_grid_key.is_none());
+        assert!(state.last_stable_visibility_scene.is_none());
+        assert!(state.last_stable_visibility_tiles.is_none());
         assert!(state.fog_reset_error().is_none());
         assert!(state.fog_reset_target_game_key.is_none());
 
@@ -2798,7 +2820,60 @@ mod tests {
         };
         let projection = FogProjection::new(&map, FogScene::Local(2), GridSource::Local, (32, 32));
 
-        assert_eq!(projection.visible_scene_coords(), vec![(0, 0)]);
+        assert_eq!(
+            projection.visible_scene_coords(map.visibility_tiles.as_ref()),
+            vec![(0, 0)]
+        );
+    }
+
+    #[test]
+    fn build_fog_texture_reuses_last_stable_visibility_without_persisting_it() {
+        let mut state = MinimapState::new();
+        let mut visibility = [FOG_HIDDEN_TILE; VIEWPORT_VISIBILITY_LEN];
+        let center = (VIEWPORT_VISIBILITY_HEIGHT / 2) * VIEWPORT_VISIBILITY_WIDTH
+            + VIEWPORT_VISIBILITY_WIDTH / 2;
+        visibility[center] = 0x01;
+
+        let stable_map = MapState {
+            location: LocationType::Overworld,
+            z: 0,
+            x: 10,
+            y: 12,
+            dungeon_facing: None,
+            transport: 0,
+            scroll_x: 0,
+            scroll_y: 0,
+            tiles: [0; 1024],
+            combat_tiles: None,
+            visibility_tiles: Some(visibility),
+            objects: Vec::new(),
+        };
+        let fog = build_fog_texture(&mut state, &stable_map, GridSource::Outdoor, (11, 11));
+        assert_eq!(fog[center], FOG_VISIBILITY_VISIBLE);
+
+        let scene = FogScene::Britannia;
+        let scene_data = state.fog.scene_data(scene).to_vec();
+        assert_eq!(scene_data[12 * 256 + 10], 1);
+
+        let transitioning_map = MapState {
+            x: 11,
+            visibility_tiles: None,
+            ..stable_map
+        };
+        let fog = build_fog_texture(
+            &mut state,
+            &transitioning_map,
+            GridSource::Outdoor,
+            (11, 11),
+        );
+        assert_eq!(fog[center], FOG_VISIBILITY_VISIBLE);
+
+        let scene_data = state.fog.scene_data(scene).to_vec();
+        assert_eq!(
+            scene_data[12 * 256 + 11],
+            0,
+            "display-only fallback visibility must not permanently reveal tiles"
+        );
     }
 
     #[test]

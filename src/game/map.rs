@@ -330,7 +330,9 @@ pub fn read_map_state_with_visibility_snapshot(
         | LocationType::Dwelling(_)
         | LocationType::Castle(_)
         | LocationType::Keep(_) => {
-            read_visibility_window(mem, dos_base, visibility_snapshot_addr, visibility_key).ok()
+            read_visibility_window(mem, dos_base, visibility_snapshot_addr, visibility_key)
+                .ok()
+                .flatten()
         }
         LocationType::Dungeon(_) | LocationType::Combat(_) => None,
     };
@@ -358,48 +360,65 @@ fn read_visibility_window(
     dos_base: usize,
     visibility_snapshot_addr: Option<usize>,
     key: VisibilityWindowKey,
-) -> Result<[u8; VIEWPORT_VISIBILITY_LEN]> {
+) -> Result<Option<[u8; VIEWPORT_VISIBILITY_LEN]>> {
     const VISIBILITY_SAMPLE_COUNT: usize = 5;
     const VISIBILITY_HIDDEN_TILE: u8 = 0xFF;
-    const SNAPSHOT_RETRY_COUNT: usize = 8;
-    const SNAPSHOT_RETRY_DELAY_MS: u64 = 2;
+    const SNAPSHOT_RETRY_COUNT: usize = 24;
+    const SNAPSHOT_RETRY_DELAY_MS: u64 = 5;
 
     if let Some(snapshot_addr) = visibility_snapshot_addr {
         let light = mem.read_u8(inv_addr(dos_base, LIGHT_INTENSITY))?;
         for attempt in 0..SNAPSHOT_RETRY_COUNT {
             if let Some(snapshot) = read_stable_visibility_window(mem, snapshot_addr, key, light)? {
-                return Ok(snapshot);
+                return Ok(Some(snapshot));
             }
 
             if attempt + 1 < SNAPSHOT_RETRY_COUNT {
                 std::thread::sleep(Duration::from_millis(SNAPSHOT_RETRY_DELAY_MS));
             }
         }
+
+        // When the synchronized hook is installed, prefer a temporarily missing
+        // visibility window over trusting the asynchronously mutating scratch
+        // buffer. The caller can keep displaying the last stable mask while we
+        // wait for the next matching render-pass snapshot.
+        return Ok(None);
     }
 
-    let visibility_addr = ds_addr(dos_base, VIEWPORT_VISIBILITY_GRID);
-    let mut scratch = [0u8; VIEWPORT_VISIBILITY_STRIDE * VIEWPORT_VISIBILITY_HEIGHT];
-    let mut samples = Vec::with_capacity(VISIBILITY_SAMPLE_COUNT);
+    let active = read_async_visibility_window(
+        mem,
+        ds_addr(dos_base, VIEWPORT_VISIBILITY_GRID),
+        VISIBILITY_SAMPLE_COUNT,
+        VISIBILITY_HIDDEN_TILE,
+    )?;
+    Ok(Some(active))
+}
 
-    for sample_idx in 0..VISIBILITY_SAMPLE_COUNT {
+fn read_async_visibility_window(
+    mem: &dyn MemoryAccess,
+    visibility_addr: usize,
+    sample_count: usize,
+    hidden_tile: u8,
+) -> Result<[u8; VIEWPORT_VISIBILITY_LEN]> {
+    let mut scratch = [0u8; VIEWPORT_VISIBILITY_STRIDE * VIEWPORT_VISIBILITY_HEIGHT];
+    let mut samples = Vec::with_capacity(sample_count);
+
+    for sample_idx in 0..sample_count {
         mem.read_bytes(visibility_addr, &mut scratch)?;
         let active = extract_visibility_window(&scratch);
         samples.push(active);
 
-        if sample_idx + 1 < VISIBILITY_SAMPLE_COUNT {
+        if sample_idx + 1 < sample_count {
             std::thread::sleep(Duration::from_millis(1));
         }
     }
 
-    let repeated_mask = dominant_visibility_mask(&samples, VISIBILITY_HIDDEN_TILE);
+    let repeated_mask = dominant_visibility_mask(&samples, hidden_tile);
     if let Some((_, latest_idx)) = repeated_mask.filter(|(count, _)| *count > 1) {
         return Ok(samples[latest_idx]);
     }
 
-    Ok(select_visibility_window_medoid(
-        &samples,
-        VISIBILITY_HIDDEN_TILE,
-    ))
+    Ok(select_visibility_window_medoid(&samples, hidden_tile))
 }
 
 fn read_stable_visibility_window(
@@ -845,13 +864,14 @@ mod tests {
         mock.set_bytes(snapshot_addr, &snapshot);
 
         let state = read_map_state_with_visibility_snapshot(&mock, 0, Some(snapshot_addr)).unwrap();
-        let visibility = state.visibility_tiles.unwrap();
-        assert_eq!(visibility[0], 0x00);
-        assert_eq!(visibility[VIEWPORT_VISIBILITY_WIDTH - 1], 0x0A);
+        assert!(
+            state.visibility_tiles.is_none(),
+            "stale synchronized snapshots should not fall back to the async scratch buffer"
+        );
     }
 
     #[test]
-    fn visibility_reader_waits_for_matching_snapshot_before_raw_fallback() {
+    fn visibility_reader_waits_for_matching_snapshot_before_accepting_visibility() {
         let snapshot_addr = 0x2F000;
         let mock = SnapshotRetryMemory::new(
             snapshot_addr + VISIBILITY_SNAPSHOT_TOTAL_LEN + 0x100,
