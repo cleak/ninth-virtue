@@ -7,7 +7,7 @@ use egui::emath::GuiRounding;
 use egui::epaint::PaintCallbackInfo;
 use egui::{Color32, FontId, Pos2, Rect, Stroke, StrokeKind, vec2};
 
-use crate::game::map::{CardinalDirection, LocationType, MapState, ObjectEntry, TileGridEncoding};
+use crate::game::map::{CardinalDirection, LocationType, MapState, TileGridEncoding};
 use crate::game::offsets::{
     COMBAT_TERRAIN_HEIGHT, COMBAT_TERRAIN_LEN, COMBAT_TERRAIN_STRIDE, COMBAT_TERRAIN_WIDTH,
     DUNGEON_LEVEL_HEIGHT, DUNGEON_LEVEL_LEN, DUNGEON_LEVEL_WIDTH, VIEWPORT_VISIBILITY_HEIGHT,
@@ -196,7 +196,9 @@ struct GridCacheKey {
 /// callback (for rendering). Protected by a mutex.
 struct GpuState {
     renderer: Option<MinimapGl>,
-    grid_dirty: bool,
+    terrain_dirty: bool,
+    objects_dirty: bool,
+    lowpass_dirty: bool,
     fog_dirty: bool,
     grid_data: Vec<u8>,
     objects_data: Vec<u8>,
@@ -233,7 +235,9 @@ impl Default for MinimapState {
             map: None,
             gpu: Arc::new(Mutex::new(GpuState {
                 renderer: None,
-                grid_dirty: false,
+                terrain_dirty: false,
+                objects_dirty: false,
+                lowpass_dirty: false,
                 fog_dirty: false,
                 grid_data: Vec::new(),
                 objects_data: Vec::new(),
@@ -381,7 +385,9 @@ impl MinimapState {
 
         let mut gpu = self.gpu.lock().unwrap();
         gpu.renderer = None;
-        gpu.grid_dirty = false;
+        gpu.terrain_dirty = false;
+        gpu.objects_dirty = false;
+        gpu.lowpass_dirty = false;
         gpu.fog_dirty = false;
         gpu.grid_data.clear();
         gpu.objects_data.clear();
@@ -458,8 +464,7 @@ pub fn show(
 
     // Prepare tile grid data on CPU when map state changes.
     // Object positions change every game turn, so always update when objects are present.
-    let has_objects = !map.objects.is_empty();
-    let needs_update = needs_grid_refresh(state.last_grid_key, grid_key, has_objects);
+    let needs_update = needs_grid_refresh(state.last_grid_key, grid_key);
 
     let (grid_dims, player_tile, fog_data) = if needs_update {
         let (grid_data, grid_w, grid_h, player_tile) =
@@ -478,8 +483,7 @@ pub fn show(
                 extract_local_scene_grid(&map)
             };
 
-        let objects_data =
-            build_objects_overlay(&map.objects, grid_w as usize, grid_h as usize, &map);
+        let objects_data = build_objects_overlay(&map, grid_w as usize, grid_h as usize);
         let lowpass_data = build_lowpass_map(
             &grid_data,
             &objects_data,
@@ -495,7 +499,9 @@ pub fn show(
         gpu.lowpass_data = lowpass_data;
         gpu.grid_dims = (grid_w, grid_h);
         gpu.player_tile = player_tile;
-        gpu.grid_dirty = true;
+        gpu.terrain_dirty = true;
+        gpu.objects_dirty = true;
+        gpu.lowpass_dirty = true;
         gpu.fog_data = fog_data.clone();
         gpu.fog_dirty = true;
 
@@ -507,8 +513,24 @@ pub fn show(
             (gpu.grid_dims, gpu.player_tile)
         };
         let fog_data = build_fog_texture(state, &map, grid_source, grid_dims);
+        let objects_data = build_objects_overlay(&map, grid_dims.0 as usize, grid_dims.1 as usize);
 
         let mut gpu = state.gpu.lock().unwrap();
+        if gpu.objects_data != objects_data {
+            let lowpass_data = build_lowpass_map(
+                &gpu.grid_data,
+                &objects_data,
+                state.tile_lowpass_lut.as_ref().unwrap(),
+                grid_dims.0 as usize,
+                grid_dims.1 as usize,
+            );
+            gpu.objects_data = objects_data;
+            gpu.objects_dirty = true;
+            if gpu.lowpass_data != lowpass_data {
+                gpu.lowpass_data = lowpass_data;
+                gpu.lowpass_dirty = true;
+            }
+        }
         if gpu.fog_data != fog_data {
             gpu.fog_data = fog_data.clone();
             gpu.fog_dirty = true;
@@ -540,18 +562,27 @@ pub fn show(
         // Lazy-init: create renderer and upload atlas on first callback
         if gpu.renderer.is_none() {
             gpu.renderer = Some(MinimapGl::new(gl, &raw_atlas));
-            // Force grid upload on first frame
-            gpu.grid_dirty = true;
+            // Force all textures to upload on first frame.
+            gpu.terrain_dirty = true;
+            gpu.objects_dirty = true;
+            gpu.lowpass_dirty = true;
             gpu.fog_dirty = true;
         }
 
-        // Upload grid and objects textures if dirty
-        if gpu.grid_dirty {
+        if gpu.terrain_dirty {
             let renderer = gpu.renderer.as_ref().unwrap();
             renderer.update_grid(gl, &gpu.grid_data, gpu.grid_dims.0, gpu.grid_dims.1);
+            gpu.terrain_dirty = false;
+        }
+        if gpu.objects_dirty {
+            let renderer = gpu.renderer.as_ref().unwrap();
             renderer.update_objects(gl, &gpu.objects_data, gpu.grid_dims.0, gpu.grid_dims.1);
+            gpu.objects_dirty = false;
+        }
+        if gpu.lowpass_dirty {
+            let renderer = gpu.renderer.as_ref().unwrap();
             renderer.update_lowpass(gl, &gpu.lowpass_data, gpu.grid_dims.0, gpu.grid_dims.1);
-            gpu.grid_dirty = false;
+            gpu.lowpass_dirty = false;
         }
         if gpu.fog_dirty {
             let renderer = gpu.renderer.as_ref().unwrap();
@@ -1618,12 +1649,7 @@ fn extract_combat_grid(tiles: &[u8; COMBAT_TERRAIN_LEN]) -> Vec<u8> {
 ///
 /// Each cell is 0 (no object) or the object's tile byte. The shader adds 256
 /// to get the animated-page sprite from the atlas.
-fn build_objects_overlay(
-    objects: &[ObjectEntry],
-    grid_w: usize,
-    grid_h: usize,
-    map: &MapState,
-) -> Vec<u8> {
+fn build_objects_overlay(map: &MapState, grid_w: usize, grid_h: usize) -> Vec<u8> {
     debug_assert!(
         !matches!(map.location, LocationType::Dungeon(_)),
         "dungeon walking maps use the abstract painter path instead of sprite overlays"
@@ -1634,7 +1660,10 @@ fn build_objects_overlay(
     let outdoor = map.is_outdoor();
     let combat = matches!(map.location, LocationType::Combat(_));
 
-    for obj in objects {
+    for obj in &map.objects {
+        if obj.slot == 0 {
+            continue;
+        }
         if !outdoor && obj.floor != map.z {
             continue;
         }
@@ -1656,6 +1685,27 @@ fn build_objects_overlay(
 
         if gx >= 0 && gx < grid_w as i32 && gy >= 0 && gy < grid_h as i32 {
             overlay[gy as usize * grid_w + gx as usize] = obj.tile;
+        }
+    }
+
+    // Slot 0 tracks the party avatar, but its coordinates can lag the
+    // authoritative player position. Re-anchor that sprite to the player tile
+    // so the transport/avatar art stays in sync with the marker.
+    if let Some(tile) = map.player_avatar_tile() {
+        let (gx, gy) = if outdoor {
+            (
+                (grid_w as f32 / 2.0).floor() as usize,
+                (grid_h as f32 / 2.0).floor() as usize,
+            )
+        } else {
+            let player_tile = local_scene_player_tile(map);
+            (
+                player_tile[0].floor() as usize,
+                player_tile[1].floor() as usize,
+            )
+        };
+        if gx < grid_w && gy < grid_h {
+            overlay[gy * grid_w + gx] = tile;
         }
     }
 
@@ -2020,12 +2070,8 @@ fn visible_world_locations<'a>(
 }
 
 /// Return whether the cached tile grid must be rebuilt for the current frame.
-fn needs_grid_refresh(
-    last_grid_key: Option<GridCacheKey>,
-    grid_key: GridCacheKey,
-    has_objects: bool,
-) -> bool {
-    last_grid_key != Some(grid_key) || has_objects
+fn needs_grid_refresh(last_grid_key: Option<GridCacheKey>, grid_key: GridCacheKey) -> bool {
+    last_grid_key != Some(grid_key)
 }
 
 /// Position a label near its marker while clamping it into the visible map area.
@@ -2085,7 +2131,7 @@ fn world_marker_color(category: WorldLabelCategory) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::map::LocationType;
+    use crate::game::map::{LocationType, ObjectEntry};
     use crate::game::offsets::VIEWPORT_VISIBILITY_LEN;
     use crate::game::quest::Virtue;
     use crate::game::world_map::{WorldLabelKind, WorldLocation};
@@ -2228,7 +2274,6 @@ mod tests {
                 local_map: None,
                 outdoor_z: Some(0),
             },
-            false,
         ));
         assert!(!needs_grid_refresh(
             Some(GridCacheKey {
@@ -2247,7 +2292,6 @@ mod tests {
                 local_map: None,
                 outdoor_z: Some(0),
             },
-            false,
         ));
     }
 
@@ -2270,7 +2314,6 @@ mod tests {
                 local_map: Some((LocationType::Town(2), 0)),
                 outdoor_z: None,
             },
-            false,
         ));
         assert!(needs_grid_refresh(
             Some(GridCacheKey {
@@ -2289,7 +2332,6 @@ mod tests {
                 local_map: Some((LocationType::Dungeon(33), 1)),
                 outdoor_z: None,
             },
-            false,
         ));
     }
 
@@ -2312,7 +2354,6 @@ mod tests {
                 local_map: None,
                 outdoor_z: Some(0xFF),
             },
-            false,
         ));
     }
 
@@ -2335,7 +2376,6 @@ mod tests {
                 local_map: None,
                 outdoor_z: Some(0),
             },
-            false,
         ));
     }
 
@@ -2370,7 +2410,9 @@ mod tests {
 
         {
             let mut gpu = state.gpu.lock().unwrap();
-            gpu.grid_dirty = true;
+            gpu.terrain_dirty = true;
+            gpu.objects_dirty = true;
+            gpu.lowpass_dirty = true;
             gpu.fog_dirty = true;
             gpu.grid_data = vec![1];
             gpu.objects_data = vec![2];
@@ -2393,7 +2435,9 @@ mod tests {
         let gpu = state.gpu.lock().unwrap();
         // clear() must drop the GL-backed renderer so the next paint callback rebuilds it.
         assert!(gpu.renderer.is_none());
-        assert!(!gpu.grid_dirty);
+        assert!(!gpu.terrain_dirty);
+        assert!(!gpu.objects_dirty);
+        assert!(!gpu.lowpass_dirty);
         assert!(!gpu.fog_dirty);
         assert!(gpu.grid_data.is_empty());
         assert!(gpu.objects_data.is_empty());
@@ -2536,24 +2580,25 @@ mod tests {
             tiles: [0; 1024],
             combat_tiles: None,
             visibility_tiles: None,
-            objects: Vec::new(),
+            objects: vec![
+                ObjectEntry {
+                    slot: 1,
+                    tile: 7,
+                    x: 4,
+                    y: 5,
+                    floor: 0xFF,
+                },
+                ObjectEntry {
+                    slot: 2,
+                    tile: 9,
+                    x: 6,
+                    y: 7,
+                    floor: 0,
+                },
+            ],
         };
-        let objects = vec![
-            ObjectEntry {
-                tile: 7,
-                x: 4,
-                y: 5,
-                floor: 0xFF,
-            },
-            ObjectEntry {
-                tile: 9,
-                x: 6,
-                y: 7,
-                floor: 0,
-            },
-        ];
 
-        let overlay = build_objects_overlay(&objects, 32, 32, &map);
+        let overlay = build_objects_overlay(&map, 32, 32);
         assert_eq!(overlay[5 * 32 + 4], 7);
         assert_eq!(overlay[7 * 32 + 6], 0);
     }
@@ -2572,16 +2617,16 @@ mod tests {
             tiles: [0; 1024],
             combat_tiles: None,
             visibility_tiles: None,
-            objects: Vec::new(),
+            objects: vec![ObjectEntry {
+                slot: 4,
+                tile: 11,
+                x: 6,
+                y: 9,
+                floor: 0,
+            }],
         };
-        let objects = vec![ObjectEntry {
-            tile: 11,
-            x: 6,
-            y: 9,
-            floor: 0,
-        }];
 
-        let overlay = build_objects_overlay(&objects, 11, 11, &map);
+        let overlay = build_objects_overlay(&map, 11, 11);
         assert_eq!(overlay[9 * 11 + 6], 11);
     }
 
@@ -2599,17 +2644,81 @@ mod tests {
             tiles: [0; 1024],
             combat_tiles: None,
             visibility_tiles: None,
-            objects: Vec::new(),
+            objects: vec![ObjectEntry {
+                slot: 1,
+                tile: 17,
+                x: 38,
+                y: 222,
+                floor: 0,
+            }],
         };
-        let objects = vec![ObjectEntry {
-            tile: 17,
-            x: 38,
-            y: 222,
-            floor: 0,
-        }];
 
-        let overlay = build_objects_overlay(&objects, 96, 48, &map);
+        let overlay = build_objects_overlay(&map, 96, 48);
         assert_eq!(overlay[24 * 96 + 48], 17);
+    }
+
+    #[test]
+    fn object_overlay_anchors_party_avatar_to_player_position() {
+        let map = MapState {
+            location: LocationType::Town(2),
+            z: 0,
+            x: 5,
+            y: 5,
+            dungeon_facing: None,
+            transport: 0,
+            scroll_x: 0,
+            scroll_y: 0,
+            tiles: [0; 1024],
+            combat_tiles: None,
+            visibility_tiles: None,
+            objects: vec![
+                ObjectEntry {
+                    slot: 0,
+                    tile: 7,
+                    x: 5,
+                    y: 5,
+                    floor: 0,
+                },
+                ObjectEntry {
+                    slot: 3,
+                    tile: 11,
+                    x: 6,
+                    y: 5,
+                    floor: 0,
+                },
+            ],
+        };
+
+        let overlay = build_objects_overlay(&map, 32, 32);
+        assert_eq!(overlay[5 * 32 + 5], 7);
+        assert_eq!(overlay[5 * 32 + 6], 11);
+    }
+
+    #[test]
+    fn object_overlay_prefers_transport_tile_for_party_avatar() {
+        let map = MapState {
+            location: LocationType::Overworld,
+            z: 0,
+            x: 42,
+            y: 84,
+            dungeon_facing: None,
+            transport: 36,
+            scroll_x: 0,
+            scroll_y: 0,
+            tiles: [0; 1024],
+            combat_tiles: None,
+            visibility_tiles: None,
+            objects: vec![ObjectEntry {
+                slot: 0,
+                tile: 28,
+                x: 12,
+                y: 34,
+                floor: 0,
+            }],
+        };
+
+        let overlay = build_objects_overlay(&map, 11, 11);
+        assert_eq!(overlay[5 * 11 + 5], 36);
     }
 
     #[test]

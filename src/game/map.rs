@@ -238,6 +238,21 @@ impl MapState {
             self.location.name()
         }
     }
+
+    /// Return the tile that should represent the party on the minimap.
+    ///
+    /// Mounted travel uses the authoritative transport byte; otherwise slot 0
+    /// of the object table holds the on-foot avatar sprite.
+    pub fn player_avatar_tile(&self) -> Option<u8> {
+        if self.transport != 0 {
+            Some(self.transport)
+        } else {
+            self.objects
+                .iter()
+                .find(|obj| obj.slot == 0)
+                .map(|obj| obj.tile)
+        }
+    }
 }
 
 /// An object from the 32-slot object table (save offset 0x6B4).
@@ -246,6 +261,8 @@ impl MapState {
 /// the party avatar (slot 0), vehicles, NPCs, and monsters.
 #[derive(Debug, Clone)]
 pub struct ObjectEntry {
+    /// Stable object-table slot (0..31). Slot 0 is the party avatar.
+    pub slot: usize,
     /// Tile byte from field +0 (add 0x100 for the full tile atlas index).
     pub tile: u8,
     pub x: u8,
@@ -575,13 +592,14 @@ fn read_objects(mem: &dyn MemoryAccess, dos_base: usize) -> Result<Vec<ObjectEnt
     mem.read_bytes(inv_addr(dos_base, OBJECT_TABLE), &mut raw)?;
 
     let mut objects = Vec::new();
-    for rec in raw.chunks_exact(OBJECT_ENTRY_SIZE) {
+    for (slot, rec) in raw.chunks_exact(OBJECT_ENTRY_SIZE).enumerate() {
         let tile = rec[OBJ_TILE1];
         // 0x00 = empty slot, 0x1D/0x1E = dead/gone sentinel markers
         if matches!(tile, 0 | 0x1D | 0x1E) {
             continue;
         }
         objects.push(ObjectEntry {
+            slot,
             tile,
             x: rec[OBJ_X],
             y: rec[OBJ_Y],
@@ -1206,6 +1224,7 @@ mod tests {
 
         let state = read_map_state(&mock, 0).unwrap();
         let obj = state.objects.first().unwrap();
+        assert_eq!(obj.slot, 0);
         assert_eq!(obj.tile, 0x01);
         assert_eq!(obj.x, 4);
         assert_eq!(obj.y, 5);

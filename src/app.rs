@@ -11,6 +11,10 @@ use crate::game::inventory::{
     Inventory, InventoryLocks, apply_inventory_locks, read_inventory, write_inventory,
 };
 use crate::game::map;
+use crate::game::offsets::{
+    COMBAT_TERRAIN_GRID, COMBAT_TERRAIN_LEN, MAP_TILES, MAP_TILES_LEN, VIEWPORT_VISIBILITY_GRID,
+    VIEWPORT_VISIBILITY_HEIGHT, VIEWPORT_VISIBILITY_STRIDE, ds_addr, inv_addr,
+};
 use crate::game::quest::{ShrineQuest, read_shrine_quest};
 use crate::game::vehicle::{self, Frigate};
 use crate::game::world_map::WorldMap;
@@ -18,6 +22,7 @@ use crate::gui;
 use crate::gui::memory_watch_panel::MemoryWatch;
 use crate::gui::minimap_panel::MinimapState;
 use crate::memory::access::MemoryAccess;
+use crate::memory::buffered::BufferedMemory;
 use crate::memory::process::{self, DosBoxProcess};
 use crate::memory::scanner;
 use crate::preferences;
@@ -37,6 +42,9 @@ const PROCESS_SCAN_INTERVAL: Duration = Duration::from_secs(2);
 const RESCAN_INTERVAL: Duration = Duration::from_secs(2);
 /// Keep lock-only polling responsive without forcing full-speed auto-refresh.
 const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const DEFAULT_REFRESH_INTERVAL_SECS: f32 = 0.2;
+const SAVE_SNAPSHOT_LEN: usize = MAP_TILES + MAP_TILES_LEN;
+const VIEWPORT_SNAPSHOT_LEN: usize = VIEWPORT_VISIBILITY_HEIGHT * VIEWPORT_VISIBILITY_STRIDE;
 
 pub struct UltimaCompanion {
     // Connection state
@@ -117,7 +125,7 @@ impl UltimaCompanion {
             auto_refresh: true,
             party_locks: persistent_locks.party,
             inventory_locks: persistent_locks.inventory,
-            refresh_interval_secs: 0.025,
+            refresh_interval_secs: DEFAULT_REFRESH_INTERVAL_SECS,
             last_refresh: Instant::now(),
             status_msg: "Searching for DOSBox...".to_string(),
             patch_state: None,
@@ -529,8 +537,16 @@ impl UltimaCompanion {
                 refresh_error = Some(msg);
             }
         };
+        let snapshot = match Self::capture_read_snapshot(mem, dos_base) {
+            Ok(snapshot) => snapshot,
+            Err(e) => {
+                *status_msg = format!("Read game snapshot failed: {e}");
+                return false;
+            }
+        };
+        let snapshot_mem: &dyn MemoryAccess = &snapshot;
 
-        match Self::refresh_party_cache(mem, dos_base, party_locks, party) {
+        match Self::refresh_party_cache(snapshot_mem, mem, dos_base, party_locks, party) {
             Ok((latest_party, wrote)) => {
                 *party = latest_party;
                 game_written |= wrote;
@@ -541,7 +557,8 @@ impl UltimaCompanion {
             }
         }
 
-        match Self::refresh_inventory_cache(mem, dos_base, inventory_locks, inventory) {
+        match Self::refresh_inventory_cache(snapshot_mem, mem, dos_base, inventory_locks, inventory)
+        {
             Ok((latest_inventory, wrote)) => {
                 *inventory = latest_inventory;
                 game_written |= wrote;
@@ -552,12 +569,12 @@ impl UltimaCompanion {
             }
         }
 
-        match read_shrine_quest(mem, dos_base) {
+        match read_shrine_quest(snapshot_mem, dos_base) {
             Ok(sq) => *shrine_quest = sq,
             Err(e) => note_refresh_error(format!("Read shrine quest failed: {e}")),
         }
 
-        match vehicle::read_frigates(mem, dos_base) {
+        match vehicle::read_frigates(snapshot_mem, dos_base) {
             Ok(f) => *frigates = f,
             Err(e) => note_refresh_error(format!("Read frigates failed: {e}")),
         }
@@ -577,8 +594,34 @@ impl UltimaCompanion {
         game_written
     }
 
+    fn capture_read_snapshot(
+        mem: &dyn MemoryAccess,
+        dos_base: usize,
+    ) -> anyhow::Result<BufferedMemory> {
+        let mut snapshot = BufferedMemory::new();
+
+        let save_addr = inv_addr(dos_base, 0);
+        snapshot.capture_range(mem, save_addr, SAVE_SNAPSHOT_LEN)?;
+
+        // Scratch buffers are scene-specific best-effort reads. When a scene
+        // is not using one of them, decode should fall back cleanly.
+        snapshot.capture_optional_range(
+            mem,
+            ds_addr(dos_base, VIEWPORT_VISIBILITY_GRID),
+            VIEWPORT_SNAPSHOT_LEN,
+        );
+        snapshot.capture_optional_range(
+            mem,
+            ds_addr(dos_base, COMBAT_TERRAIN_GRID),
+            COMBAT_TERRAIN_LEN,
+        );
+
+        Ok(snapshot)
+    }
+
     fn is_transient_refresh_status(status_msg: &str) -> bool {
         [
+            "Read game snapshot failed:",
             "Read party failed:",
             "Write character failed:",
             "Read inventory failed:",
@@ -592,22 +635,23 @@ impl UltimaCompanion {
     }
 
     fn refresh_party_cache(
-        mem: &dyn MemoryAccess,
+        read_mem: &dyn MemoryAccess,
+        write_mem: &dyn MemoryAccess,
         dos_base: usize,
         locks: &PartyLocks,
         current_party: &[Character],
     ) -> std::result::Result<(Vec<Character>, bool), (String, Vec<Character>)> {
-        let mut party = read_party(mem, dos_base)
+        let mut party = read_party(read_mem, dos_base)
             .map_err(|e| (format!("Read party failed: {e}"), current_party.to_vec()))?;
         let mut wrote = false;
 
         if locks.any_active() {
             for ch in &mut party {
                 if apply_party_locks(ch, locks) {
-                    if let Err(e) = write_character(mem, dos_base, ch) {
+                    if let Err(e) = write_character(write_mem, dos_base, ch) {
                         return Err((
                             format!("Write character failed: {e}"),
-                            Self::restore_party_cache(mem, dos_base, party),
+                            Self::restore_party_cache(write_mem, dos_base, party),
                         ));
                     }
                     wrote = true;
@@ -627,12 +671,13 @@ impl UltimaCompanion {
     }
 
     fn refresh_inventory_cache(
-        mem: &dyn MemoryAccess,
+        read_mem: &dyn MemoryAccess,
+        write_mem: &dyn MemoryAccess,
         dos_base: usize,
         locks: &InventoryLocks,
         current_inventory: &Inventory,
     ) -> std::result::Result<(Inventory, bool), (String, Inventory)> {
-        let mut inventory = read_inventory(mem, dos_base).map_err(|e| {
+        let mut inventory = read_inventory(read_mem, dos_base).map_err(|e| {
             (
                 format!("Read inventory failed: {e}"),
                 current_inventory.clone(),
@@ -640,10 +685,10 @@ impl UltimaCompanion {
         })?;
         let wrote = locks.any_active() && apply_inventory_locks(&mut inventory, locks);
 
-        if wrote && let Err(e) = write_inventory(mem, dos_base, &inventory) {
+        if wrote && let Err(e) = write_inventory(write_mem, dos_base, &inventory) {
             return Err((
                 format!("Write inventory failed: {e}"),
-                Self::restore_inventory_cache(mem, dos_base, inventory),
+                Self::restore_inventory_cache(write_mem, dos_base, inventory),
             ));
         }
 
@@ -988,7 +1033,7 @@ mod tests {
             auto_refresh: true,
             party_locks: PartyLocks::default(),
             inventory_locks: InventoryLocks::default(),
-            refresh_interval_secs: 0.025,
+            refresh_interval_secs: DEFAULT_REFRESH_INTERVAL_SECS,
             last_refresh: Instant::now(),
             status_msg: "Connected".to_string(),
             patch_state: None,
@@ -997,6 +1042,29 @@ mod tests {
             audio_volume: 1.0,
             audio_muted: false,
         }
+    }
+
+    fn refresh_test_state(
+        app: &mut UltimaCompanion,
+        mem: &dyn MemoryAccess,
+        connected_status: &str,
+    ) {
+        UltimaCompanion::refresh_cached_game_state_fields(
+            CachedGameStateRefs {
+                party: &mut app.party,
+                inventory: &mut app.inventory,
+                shrine_quest: &mut app.shrine_quest,
+                frigates: &mut app.frigates,
+                minimap: &mut app.minimap,
+                status_msg: &mut app.status_msg,
+                party_locks: &app.party_locks,
+                inventory_locks: &app.inventory_locks,
+            },
+            mem,
+            0,
+            None,
+            connected_status,
+        );
     }
 
     #[test]
@@ -1082,7 +1150,7 @@ mod tests {
         };
 
         let (err, party) =
-            UltimaCompanion::refresh_party_cache(&mem, 0, &app.party_locks, &app.party)
+            UltimaCompanion::refresh_party_cache(&mem, &mem, 0, &app.party_locks, &app.party)
                 .unwrap_err();
         app.party = party;
 
@@ -1111,9 +1179,14 @@ mod tests {
         };
         app.inventory_locks.food = true;
 
-        let (err, inventory) =
-            UltimaCompanion::refresh_inventory_cache(&mem, 0, &app.inventory_locks, &app.inventory)
-                .unwrap_err();
+        let (err, inventory) = UltimaCompanion::refresh_inventory_cache(
+            &mem,
+            &mem,
+            0,
+            &app.inventory_locks,
+            &app.inventory,
+        )
+        .unwrap_err();
         app.inventory = inventory;
 
         assert_eq!(err, "Write inventory failed: forced write failure");
@@ -1132,22 +1205,7 @@ mod tests {
         let mut app = test_app();
         let connected_status = "Connected to dosbox (PID 1234)";
 
-        UltimaCompanion::refresh_cached_game_state_fields(
-            CachedGameStateRefs {
-                party: &mut app.party,
-                inventory: &mut app.inventory,
-                shrine_quest: &mut app.shrine_quest,
-                frigates: &mut app.frigates,
-                minimap: &mut app.minimap,
-                status_msg: &mut app.status_msg,
-                party_locks: &app.party_locks,
-                inventory_locks: &app.inventory_locks,
-            },
-            &mem,
-            0,
-            None,
-            connected_status,
-        );
+        refresh_test_state(&mut app, &mem, connected_status);
 
         assert_eq!(
             app.status_msg,
@@ -1166,40 +1224,29 @@ mod tests {
         let mut app = test_app();
         let connected_status = "Connected to dosbox (PID 1234)";
 
-        UltimaCompanion::refresh_cached_game_state_fields(
-            CachedGameStateRefs {
-                party: &mut app.party,
-                inventory: &mut app.inventory,
-                shrine_quest: &mut app.shrine_quest,
-                frigates: &mut app.frigates,
-                minimap: &mut app.minimap,
-                status_msg: &mut app.status_msg,
-                party_locks: &app.party_locks,
-                inventory_locks: &app.inventory_locks,
-            },
-            &mem,
-            0,
-            None,
-            connected_status,
-        );
+        refresh_test_state(&mut app, &mem, connected_status);
         mem.set_bytes(char_addr(0, 0, CHAR_GENDER), &[u8::from(Gender::Male)]);
-        UltimaCompanion::refresh_cached_game_state_fields(
-            CachedGameStateRefs {
-                party: &mut app.party,
-                inventory: &mut app.inventory,
-                shrine_quest: &mut app.shrine_quest,
-                frigates: &mut app.frigates,
-                minimap: &mut app.minimap,
-                status_msg: &mut app.status_msg,
-                party_locks: &app.party_locks,
-                inventory_locks: &app.inventory_locks,
-            },
-            &mem,
-            0,
-            None,
-            connected_status,
-        );
+        refresh_test_state(&mut app, &mem, connected_status);
 
+        assert_eq!(app.status_msg, connected_status);
+        assert_eq!(app.party.len(), 1);
+        assert!(app.minimap.map.is_some());
+    }
+
+    #[test]
+    fn refresh_cached_game_state_clears_snapshot_failure_status_after_recovery() {
+        let bad_mem = MockMemory::new(SAVE_BASE + 0x200);
+        let good_mem = FailingMemory::new(SAVE_BASE + 0x10000, usize::MAX);
+        seed_party_memory(&good_mem);
+        seed_inventory_memory(&good_mem);
+
+        let mut app = test_app();
+        let connected_status = "Connected to dosbox (PID 1234)";
+
+        refresh_test_state(&mut app, &bad_mem, connected_status);
+        assert!(app.status_msg.starts_with("Read game snapshot failed:"));
+
+        refresh_test_state(&mut app, &good_mem, connected_status);
         assert_eq!(app.status_msg, connected_status);
         assert_eq!(app.party.len(), 1);
         assert!(app.minimap.map.is_some());
