@@ -462,8 +462,10 @@ pub fn show(
         outdoor_z: is_outdoor.then_some(map.z),
     };
 
-    // Prepare tile grid data on CPU when map state changes.
-    // Object positions change every game turn, so always update when objects are present.
+    // `needs_update` only tracks terrain-grid invalidation via
+    // `needs_grid_refresh(state.last_grid_key, grid_key)`.
+    // Object position changes are handled separately in the non-rebuild branch
+    // below, which refreshes the object-update path without rebuilding terrain.
     let needs_update = needs_grid_refresh(state.last_grid_key, grid_key);
 
     let (grid_dims, player_tile, fog_data) = if needs_update {
