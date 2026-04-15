@@ -47,8 +47,8 @@ pub fn show(
             if *auto_refresh {
                 ui.add(
                     egui::DragValue::new(refresh_interval)
-                        .range(0.5..=5.0)
-                        .speed(0.1)
+                        .range(0.05..=5.0)
+                        .speed(0.05)
                         .suffix("s"),
                 );
             }
