@@ -6,10 +6,14 @@ visibility model before any fog-of-war feature work lands in the app.
 ## Status
 
 - Static analysis is grounded against a local Windows GOG install of Ultima V.
-- Live DOSBox validation is now partially complete for an underworld scene.
-- Current recommendation is based on static evidence plus one confirmed runtime
-  transition: verify the remaining scene families, then read engine buffers
-  directly instead of porting visibility logic.
+- Live DOSBox validation now includes underworld plus an overworld moongate
+  scene that exposed a key race in the old assumptions.
+- Current recommendation is no longer "read `DS:0xAB02` directly". The app now
+  prefers a synchronized post-render snapshot captured inside the resident
+  `0x5910` call path; direct `AB02` sampling remains only as a fallback when
+  that snapshot is unavailable. A direct port of the producer/consumer logic is
+  still the long-term reference path if the synchronized snapshot proves
+  insufficient in additional scenes.
 
 ## Artifact Freeze
 
@@ -96,7 +100,7 @@ High-confidence conclusion:
 - Exact visibility must treat `0x58A5` as the authoritative light radius or
   intensity byte, not derive radius directly from spell/torch duration.
 
-### 2. The resident EXE builds a reusable 11x11 viewport scratch grid at `DS:0xAB02`
+### 2. The resident EXE builds an 11x11 viewport scratch grid at `DS:0xAB02`
 
 Key routine:
 
@@ -123,10 +127,12 @@ Observed behavior:
 High-confidence conclusion:
 
 - For overworld, underworld, towns, and other 2D scenes, `DS:0xAB02` is the
-  first buffer to verify at runtime. It is already the engine-owned viewport
-  scratch grid, and `0x58A5` is wired directly into its generation path.
+  first producer to verify at runtime. It is the engine-owned viewport scratch
+  grid, and `0x58A5` is wired directly into its generation path.
+- This finding alone is not enough to justify reading `DS:0xAB02`
+  asynchronously in the companion app.
 
-### 3. Live runtime validation confirms `DS:0xAB02` behaves like the current 2D visibility window
+### 3. Underworld runtime validation shows `DS:0xAB02` can reflect the current 2D visibility window in settled scenes
 
 Validated snapshot pair:
 
@@ -146,12 +152,48 @@ Observed behavior:
 
 High-confidence conclusion:
 
-- `DS:0xAB02` is directly usable as the current-frame visibility mask for 2D
-  scenes.
-- The buffer already tracks live light changes, so fog implementation should
-  read it rather than recompute night or torch radius.
+- `DS:0xAB02` can reflect the final current-frame visibility mask in at least
+  one settled underworld scene.
+- This was an over-generalization for overworld. Later overworld validation
+  disproved the idea that `DS:0xAB02` is always a stable reusable read target.
 
-### 4. Torch activation is driven from `CMDS.OVL`
+### 4. Overworld moongate validation shows asynchronous reads of `DS:0xAB02` are racy
+
+Validated scene:
+
+- Overworld at `x=38 y=222 z=0`, `scroll_x=16`, `scroll_y=208`, torch active,
+  moongate present nearby
+
+Observed behavior:
+
+- `save+MAP_TILES` remained byte-for-byte stable across idle samples.
+- `DS:0xAC64` remained stable across the same samples.
+- `0x58A5`, `0x5887`, `0x2186`, `0x5891`, and `0x58A4` also remained stable.
+- A 30-sample passive loop still produced 11 distinct `DS:0xAB02` hashes while
+  the player stood still.
+- Disassembly of `ULTIMA.EXE:0x56AC` shows the renderer consumes `DS:0xAB02`
+  together with `DS:0xAC64`, including special handling for `0x00`, `0xDC`,
+  and `0xDD`.
+
+High-confidence conclusion:
+
+- `DS:0xAB02` is an in-progress scratch buffer during overworld rendering and
+  is not safe to treat as a stable one-shot visibility mask when sampled
+  asynchronously.
+- `DS:0xAC64` is a stable companion terrain/fallback buffer used by the same
+  render path.
+- Exact outdoor fog needs either:
+  - a synchronized post-render capture point, or
+  - a port/reimplementation of the `0x5D0A` / `0x5A28` producer plus the
+    `0x56AC` consumer semantics.
+
+Implementation note:
+
+- `ninth-virtue` now wraps the resident `get_command` call to `0x5910` and
+  copies the compact 11x11 post-render visibility window plus scene metadata
+  into a runtime save-region buffer for host-side reads.
+
+### 5. Torch activation is driven from `CMDS.OVL`
 
 Key routine:
 
@@ -168,7 +210,7 @@ High-confidence conclusion:
 - Torch duration is set in command-processing code, then consumed later by the
   resident EXE's light-intensity routine.
 
-### 5. `MAINOUT.OVL` seeds map redraw state during scene setup
+### 6. `MAINOUT.OVL` seeds map redraw state during scene setup
 
 Key routines:
 
@@ -188,7 +230,7 @@ High-confidence conclusion:
   `MAINOUT.OVL` actively seeds redraw and scroll state, so runtime validation
   must capture snapshots both before and after a scene transition settles.
 
-### 6. Dungeon visibility likely mutates the live dungeon buffer at `DS:0x595A`
+### 7. Dungeon visibility likely mutates the live dungeon buffer at `DS:0x595A`
 
 Key routines:
 
@@ -212,7 +254,7 @@ High-confidence conclusion:
 - Runtime verification must compare `0x595A` before and after moves/rotations
   with and without torch/light spell active.
 
-### 7. Combat already uses a separate fully materialized scratch grid
+### 8. Combat already uses a separate fully materialized scratch grid
 
 Key routine:
 
@@ -234,7 +276,7 @@ High-confidence conclusion:
 
 | Scene | Candidate producer | Candidate runtime buffer | Notes |
 |---|---|---|---|
-| Overworld / Underworld / 2D interiors | `ULTIMA.EXE:0x5910`, `0x5D0A`, `0x5A28` | `DS:0xAB02` | Light intensity `0x58A5` is passed directly into generation |
+| Overworld / Underworld / 2D interiors | `ULTIMA.EXE:0x5910`, `0x5D0A`, `0x5A28`, `0x56AC` | `DS:0xAB02`, `DS:0xAC64` | `DS:0xAB02` is producer scratch; `0x56AC` consumes it with `DS:0xAC64` fallback semantics |
 | Global light state | `ULTIMA.EXE:0x4F7C..0x514A` | `0x58A5`, `0x58A6`, `0x58A7` | `0x58A5` is the authoritative current intensity |
 | Torch activation | `CMDS.OVL:0x0D98..0x0DDB` | `0x58A7` | Decrements inventory torch count |
 | Dungeon first-person | `DUNGEON.OVL:0x1AD6`, `0x150A` | `DS:0x595A` | Likely mutates the live dungeon buffer itself |
@@ -252,6 +294,7 @@ When DOSBox is running, use this flow:
 5. Diff:
    - `summary.txt`
    - `viewport-ab02.bin`
+   - `viewport-ac64.bin`
    - `dungeon-595a.bin`
    - `combat-ad14.bin`
 
@@ -277,6 +320,7 @@ Confirmed so far:
 - Scene type: `0x5893`
 - Player position: `0x5895`, `0x5896`, `0x5897`
 - Outdoor/local scroll origin: `0x589B`, `0x589C`
+- Outdoor scratch companions: `DS:0xAB02`, `DS:0xAC64`, `0x24E6`, `0x5887`, `0x2186`
 - Dungeon orientation/live state: `0x6603` and `0x595A`
 - Occluders: not yet proven from live runtime capture; static evidence only shows
   that the engine rebuilds scene-local buffers before render, not how the
@@ -284,8 +328,10 @@ Confirmed so far:
 
 ### Reusable buffer decision
 
-- **Overworld / Underworld / towns / other 2D scenes:** treat `DS:0xAB02` as the
-  primary candidate reusable visibility buffer.
+- **Overworld / Underworld / towns / other 2D scenes:** do **not** treat
+  `DS:0xAB02` as a reusable one-shot buffer. It is still the right producer to
+  study, but asynchronous reads must either sample repeatedly as a temporary
+  mitigation or move to a synchronized/post-render source.
 - **Dungeons:** treat `DS:0x595A` as the primary candidate visibility-bearing
   buffer, with the expectation that visibility is encoded into the live dungeon
   terrain bytes rather than a separate mask.
@@ -294,10 +340,12 @@ Confirmed so far:
 
 ### Final integration recommendation
 
-- **Prefer reading live engine-produced buffers first.**
-- Verify `DS:0xAB02` and `DS:0x595A` under runtime snapshots before porting any algorithm.
-- Only port the exact algorithm if runtime validation shows that the buffers are
-  too transient, too late in the pipeline, or incomplete for the minimap.
+- **Prefer reading live engine-produced buffers first, but only when they are stable.**
+- Keep using runtime capture to validate `DS:0x595A`, `DS:0xAD14`, `DS:0xAB02`,
+  and `DS:0xAC64` before porting scene-specific logic.
+- Outdoor fog now reads the synchronized post-render snapshot first and falls
+  back to asynchronous `DS:0xAB02` sampling only when the snapshot is missing
+  or stale.
 - Treat combat as out of scope for fog unless runtime capture disproves the
   current static conclusion that `DS:0xAD14` is already the fully materialized
   combat terrain grid.

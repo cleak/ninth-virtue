@@ -1,11 +1,21 @@
+use std::collections::HashMap;
+use std::time::Duration;
+
 use anyhow::Result;
 
+use crate::game::injection::{
+    VISIBILITY_SNAPSHOT_BODY_LEN, VISIBILITY_SNAPSHOT_LIGHT_IDX, VISIBILITY_SNAPSHOT_LOCATION_IDX,
+    VISIBILITY_SNAPSHOT_READY_MARKER, VISIBILITY_SNAPSHOT_READY_OFFSET,
+    VISIBILITY_SNAPSHOT_SCROLL_X_IDX, VISIBILITY_SNAPSHOT_SCROLL_Y_IDX,
+    VISIBILITY_SNAPSHOT_TILES_OFFSET, VISIBILITY_SNAPSHOT_TOTAL_LEN, VISIBILITY_SNAPSHOT_X_IDX,
+    VISIBILITY_SNAPSHOT_Y_IDX, VISIBILITY_SNAPSHOT_Z_IDX,
+};
 use crate::game::offsets::{
     COMBAT_TERRAIN_GRID, COMBAT_TERRAIN_LEN, DUNGEON_FLOORS, DUNGEON_LEVEL_LEN,
     DUNGEON_ORIENTATION, DUNGEON_TILES_DS_OFFSET, DUNGEON_TILES_LEN, DUNGEON_TILES_SAVE_OFFSET,
-    MAP_LOCATION, MAP_SCROLL_X, MAP_SCROLL_Y, MAP_TILES, MAP_TILES_LEN, MAP_TRANSPORT, MAP_X,
-    MAP_Y, MAP_Z, OBJ_FLOOR, OBJ_TILE1, OBJ_X, OBJ_Y, OBJECT_ENTRY_SIZE, OBJECT_TABLE,
-    OBJECT_TABLE_SLOTS, VIEWPORT_VISIBILITY_GRID, VIEWPORT_VISIBILITY_HEIGHT,
+    LIGHT_INTENSITY, MAP_LOCATION, MAP_SCROLL_X, MAP_SCROLL_Y, MAP_TILES, MAP_TILES_LEN,
+    MAP_TRANSPORT, MAP_X, MAP_Y, MAP_Z, OBJ_FLOOR, OBJ_TILE1, OBJ_X, OBJ_Y, OBJECT_ENTRY_SIZE,
+    OBJECT_TABLE, OBJECT_TABLE_SLOTS, VIEWPORT_VISIBILITY_GRID, VIEWPORT_VISIBILITY_HEIGHT,
     VIEWPORT_VISIBILITY_LEN, VIEWPORT_VISIBILITY_STRIDE, VIEWPORT_VISIBILITY_WIDTH, ds_addr,
     inv_addr,
 };
@@ -194,9 +204,12 @@ pub struct MapState {
     pub tiles: [u8; MAP_TILES_LEN],
     /// Raw combat terrain scratch buffer, when the current scene is combat.
     pub combat_tiles: Option<[u8; COMBAT_TERRAIN_LEN]>,
-    /// Current 2D visibility window from the engine-owned DS:0xAB02 scratch
-    /// grid, flattened to an 11x11 active region. Hidden cells read back as
-    /// 0xFF. Present only for overworld and 2D local scenes.
+    /// Current 2D visibility window flattened to an 11x11 active region.
+    ///
+    /// The reader prefers a synchronized post-render snapshot captured inside
+    /// the game loop and falls back to repeated `DS:0xAB02` samples only when
+    /// that snapshot is unavailable or stale. Hidden cells read back as 0xFF.
+    /// Present only for overworld and 2D local scenes.
     pub visibility_tiles: Option<[u8; VIEWPORT_VISIBILITY_LEN]>,
     /// Active objects on the map (NPCs, monsters, vehicles).
     /// Each entry has a tile byte (add 0x100 for the full tile index) and position.
@@ -239,8 +252,29 @@ pub struct ObjectEntry {
     pub floor: u8,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct VisibilityWindowKey {
+    location_id: u8,
+    z: u8,
+    x: u8,
+    y: u8,
+    scroll_x: u8,
+    scroll_y: u8,
+}
+
 /// Read the current map state from DOSBox memory.
+#[allow(dead_code)] // used by debug tools and tests, while the main app prefers the snapshot-aware path
 pub fn read_map_state(mem: &dyn MemoryAccess, dos_base: usize) -> Result<MapState> {
+    read_map_state_with_visibility_snapshot(mem, dos_base, None)
+}
+
+/// Read the current map state, optionally preferring a stabilized compact
+/// visibility snapshot that was captured inside the game's render loop.
+pub fn read_map_state_with_visibility_snapshot(
+    mem: &dyn MemoryAccess,
+    dos_base: usize,
+    visibility_snapshot_addr: Option<usize>,
+) -> Result<MapState> {
     let location_id = mem.read_u8(inv_addr(dos_base, MAP_LOCATION))?;
     let location = LocationType::from_id(location_id);
     let z = mem.read_u8(inv_addr(dos_base, MAP_Z))?;
@@ -281,12 +315,23 @@ pub fn read_map_state(mem: &dyn MemoryAccess, dos_base: usize) -> Result<MapStat
     } else {
         None
     };
+    let visibility_key = VisibilityWindowKey {
+        location_id,
+        z,
+        x,
+        y,
+        scroll_x,
+        scroll_y,
+    };
+
     let visibility_tiles = match location {
         LocationType::Overworld
         | LocationType::Town(_)
         | LocationType::Dwelling(_)
         | LocationType::Castle(_)
-        | LocationType::Keep(_) => read_visibility_window(mem, dos_base).ok(),
+        | LocationType::Keep(_) => {
+            read_visibility_window(mem, dos_base, visibility_snapshot_addr, visibility_key).ok()
+        }
         LocationType::Dungeon(_) | LocationType::Combat(_) => None,
     };
 
@@ -311,10 +356,85 @@ pub fn read_map_state(mem: &dyn MemoryAccess, dos_base: usize) -> Result<MapStat
 fn read_visibility_window(
     mem: &dyn MemoryAccess,
     dos_base: usize,
+    visibility_snapshot_addr: Option<usize>,
+    key: VisibilityWindowKey,
 ) -> Result<[u8; VIEWPORT_VISIBILITY_LEN]> {
-    let mut scratch = [0u8; VIEWPORT_VISIBILITY_STRIDE * VIEWPORT_VISIBILITY_HEIGHT];
-    mem.read_bytes(ds_addr(dos_base, VIEWPORT_VISIBILITY_GRID), &mut scratch)?;
+    const VISIBILITY_SAMPLE_COUNT: usize = 5;
+    const VISIBILITY_HIDDEN_TILE: u8 = 0xFF;
+    const SNAPSHOT_RETRY_COUNT: usize = 8;
+    const SNAPSHOT_RETRY_DELAY_MS: u64 = 2;
 
+    if let Some(snapshot_addr) = visibility_snapshot_addr {
+        let light = mem.read_u8(inv_addr(dos_base, LIGHT_INTENSITY))?;
+        for attempt in 0..SNAPSHOT_RETRY_COUNT {
+            if let Some(snapshot) = read_stable_visibility_window(mem, snapshot_addr, key, light)? {
+                return Ok(snapshot);
+            }
+
+            if attempt + 1 < SNAPSHOT_RETRY_COUNT {
+                std::thread::sleep(Duration::from_millis(SNAPSHOT_RETRY_DELAY_MS));
+            }
+        }
+    }
+
+    let visibility_addr = ds_addr(dos_base, VIEWPORT_VISIBILITY_GRID);
+    let mut scratch = [0u8; VIEWPORT_VISIBILITY_STRIDE * VIEWPORT_VISIBILITY_HEIGHT];
+    let mut samples = Vec::with_capacity(VISIBILITY_SAMPLE_COUNT);
+
+    for sample_idx in 0..VISIBILITY_SAMPLE_COUNT {
+        mem.read_bytes(visibility_addr, &mut scratch)?;
+        let active = extract_visibility_window(&scratch);
+        samples.push(active);
+
+        if sample_idx + 1 < VISIBILITY_SAMPLE_COUNT {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    let repeated_mask = dominant_visibility_mask(&samples, VISIBILITY_HIDDEN_TILE);
+    if let Some((_, latest_idx)) = repeated_mask.filter(|(count, _)| *count > 1) {
+        return Ok(samples[latest_idx]);
+    }
+
+    Ok(select_visibility_window_medoid(
+        &samples,
+        VISIBILITY_HIDDEN_TILE,
+    ))
+}
+
+fn read_stable_visibility_window(
+    mem: &dyn MemoryAccess,
+    snapshot_addr: usize,
+    key: VisibilityWindowKey,
+    light: u8,
+) -> Result<Option<[u8; VIEWPORT_VISIBILITY_LEN]>> {
+    let mut snapshot = [0u8; VISIBILITY_SNAPSHOT_TOTAL_LEN];
+    mem.read_bytes(snapshot_addr, &mut snapshot)?;
+
+    if snapshot[VISIBILITY_SNAPSHOT_READY_OFFSET] != VISIBILITY_SNAPSHOT_READY_MARKER {
+        return Ok(None);
+    }
+
+    if snapshot[VISIBILITY_SNAPSHOT_LOCATION_IDX] != key.location_id
+        || snapshot[VISIBILITY_SNAPSHOT_Z_IDX] != key.z
+        || snapshot[VISIBILITY_SNAPSHOT_X_IDX] != key.x
+        || snapshot[VISIBILITY_SNAPSHOT_Y_IDX] != key.y
+        || snapshot[VISIBILITY_SNAPSHOT_SCROLL_X_IDX] != key.scroll_x
+        || snapshot[VISIBILITY_SNAPSHOT_SCROLL_Y_IDX] != key.scroll_y
+        || snapshot[VISIBILITY_SNAPSHOT_LIGHT_IDX] != light
+    {
+        return Ok(None);
+    }
+
+    let mut active = [0u8; VIEWPORT_VISIBILITY_LEN];
+    active
+        .copy_from_slice(&snapshot[VISIBILITY_SNAPSHOT_TILES_OFFSET..VISIBILITY_SNAPSHOT_BODY_LEN]);
+    Ok(Some(active))
+}
+
+fn extract_visibility_window(
+    scratch: &[u8; VIEWPORT_VISIBILITY_STRIDE * VIEWPORT_VISIBILITY_HEIGHT],
+) -> [u8; VIEWPORT_VISIBILITY_LEN] {
     let mut active = [0u8; VIEWPORT_VISIBILITY_LEN];
     for row in 0..VIEWPORT_VISIBILITY_HEIGHT {
         let src = row * VIEWPORT_VISIBILITY_STRIDE;
@@ -322,8 +442,74 @@ fn read_visibility_window(
         active[dst..dst + VIEWPORT_VISIBILITY_WIDTH]
             .copy_from_slice(&scratch[src..src + VIEWPORT_VISIBILITY_WIDTH]);
     }
+    active
+}
 
-    Ok(active)
+fn dominant_visibility_mask(
+    samples: &[[u8; VIEWPORT_VISIBILITY_LEN]],
+    hidden_tile: u8,
+) -> Option<(usize, usize)> {
+    let mut counts = HashMap::<[u8; VIEWPORT_VISIBILITY_LEN], (usize, usize)>::new();
+    for (idx, sample) in samples.iter().enumerate() {
+        let mask = visibility_mask(sample, hidden_tile);
+        let entry = counts.entry(mask).or_insert((0, idx));
+        entry.0 += 1;
+        entry.1 = idx;
+    }
+
+    counts
+        .into_values()
+        .max_by_key(|&(count, latest_idx)| (count, latest_idx))
+}
+
+fn select_visibility_window_medoid(
+    samples: &[[u8; VIEWPORT_VISIBILITY_LEN]],
+    hidden_tile: u8,
+) -> [u8; VIEWPORT_VISIBILITY_LEN] {
+    debug_assert!(
+        !samples.is_empty(),
+        "visibility medoid selection requires at least one sample"
+    );
+
+    let mut best_idx = 0usize;
+    let mut best_score = (usize::MAX, usize::MAX, usize::MAX);
+
+    for (idx, sample) in samples.iter().enumerate() {
+        let total_distance = samples
+            .iter()
+            .map(|other| visibility_mask_distance(sample, other, hidden_tile))
+            .sum::<usize>();
+        let hidden_cells = sample.iter().filter(|&&tile| tile == hidden_tile).count();
+        let score = (total_distance, hidden_cells, samples.len() - 1 - idx);
+        if score < best_score {
+            best_score = score;
+            best_idx = idx;
+        }
+    }
+
+    samples[best_idx]
+}
+
+fn visibility_mask(
+    sample: &[u8; VIEWPORT_VISIBILITY_LEN],
+    hidden_tile: u8,
+) -> [u8; VIEWPORT_VISIBILITY_LEN] {
+    let mut mask = [0u8; VIEWPORT_VISIBILITY_LEN];
+    for (idx, &tile) in sample.iter().enumerate() {
+        mask[idx] = u8::from(tile == hidden_tile);
+    }
+    mask
+}
+
+fn visibility_mask_distance(
+    left: &[u8; VIEWPORT_VISIBILITY_LEN],
+    right: &[u8; VIEWPORT_VISIBILITY_LEN],
+    hidden_tile: u8,
+) -> usize {
+    left.iter()
+        .zip(right.iter())
+        .filter(|(lhs, rhs)| (**lhs == hidden_tile) != (**rhs == hidden_tile))
+        .count()
 }
 
 /// Read active objects from the 32-slot object table as a single snapshot.
@@ -352,7 +538,58 @@ fn read_objects(mem: &dyn MemoryAccess, dos_base: usize) -> Result<Vec<ObjectEnt
 mod tests {
     use super::*;
     use crate::game::offsets::SAVE_BASE;
-    use crate::memory::access::MockMemory;
+    use crate::memory::access::{MemoryAccess, MockMemory};
+    use std::cell::Cell;
+
+    struct SnapshotRetryMemory {
+        base: MockMemory,
+        snapshot_addr: usize,
+        switch_after_reads: usize,
+        snapshot_reads: Cell<usize>,
+        stale_snapshot: [u8; VISIBILITY_SNAPSHOT_TOTAL_LEN],
+        fresh_snapshot: [u8; VISIBILITY_SNAPSHOT_TOTAL_LEN],
+    }
+
+    impl SnapshotRetryMemory {
+        fn new(
+            size: usize,
+            snapshot_addr: usize,
+            switch_after_reads: usize,
+            stale_snapshot: [u8; VISIBILITY_SNAPSHOT_TOTAL_LEN],
+            fresh_snapshot: [u8; VISIBILITY_SNAPSHOT_TOTAL_LEN],
+        ) -> Self {
+            Self {
+                base: MockMemory::new(size),
+                snapshot_addr,
+                switch_after_reads,
+                snapshot_reads: Cell::new(0),
+                stale_snapshot,
+                fresh_snapshot,
+            }
+        }
+    }
+
+    impl MemoryAccess for SnapshotRetryMemory {
+        fn read_bytes(&self, addr: usize, buf: &mut [u8]) -> Result<()> {
+            if addr == self.snapshot_addr && buf.len() == VISIBILITY_SNAPSHOT_TOTAL_LEN {
+                let reads = self.snapshot_reads.get();
+                self.snapshot_reads.set(reads + 1);
+                let snapshot = if reads < self.switch_after_reads {
+                    &self.stale_snapshot
+                } else {
+                    &self.fresh_snapshot
+                };
+                buf.copy_from_slice(snapshot);
+                return Ok(());
+            }
+
+            self.base.read_bytes(addr, buf)
+        }
+
+        fn write_bytes(&self, addr: usize, data: &[u8]) -> Result<()> {
+            self.base.write_bytes(addr, data)
+        }
+    }
 
     #[test]
     fn parse_location_types() {
@@ -506,6 +743,212 @@ mod tests {
         assert_eq!(state.y, 12);
         assert_eq!(state.tiles[0], 0x05);
         assert!(state.visibility_tiles.is_none());
+    }
+
+    #[test]
+    fn stable_visibility_snapshot_is_used_when_metadata_matches() {
+        let snapshot_addr = 0x2F000;
+        let mock = MockMemory::new(snapshot_addr + VISIBILITY_SNAPSHOT_TOTAL_LEN + 0x100);
+
+        let base = SAVE_BASE;
+        mock.write_u8(base + MAP_LOCATION, 2).unwrap();
+        mock.write_u8(base + MAP_Z, 0).unwrap();
+        mock.write_u8(base + MAP_X, 10).unwrap();
+        mock.write_u8(base + MAP_Y, 12).unwrap();
+        mock.write_u8(base + MAP_TRANSPORT, 0).unwrap();
+        mock.write_u8(base + MAP_SCROLL_X, 8).unwrap();
+        mock.write_u8(base + MAP_SCROLL_Y, 9).unwrap();
+        mock.write_u8(base + LIGHT_INTENSITY, 0x0A).unwrap();
+
+        for i in 0..MAP_TILES_LEN {
+            mock.write_u8(base + MAP_TILES + i, 0x05).unwrap();
+        }
+        for row in 0..VIEWPORT_VISIBILITY_HEIGHT {
+            for col in 0..VIEWPORT_VISIBILITY_STRIDE {
+                mock.write_u8(
+                    ds_addr(0, VIEWPORT_VISIBILITY_GRID) + row * VIEWPORT_VISIBILITY_STRIDE + col,
+                    0xFF,
+                )
+                .unwrap();
+            }
+        }
+
+        let mut snapshot = [0u8; VISIBILITY_SNAPSHOT_TOTAL_LEN];
+        snapshot[VISIBILITY_SNAPSHOT_LOCATION_IDX] = 2;
+        snapshot[VISIBILITY_SNAPSHOT_Z_IDX] = 0;
+        snapshot[VISIBILITY_SNAPSHOT_X_IDX] = 10;
+        snapshot[VISIBILITY_SNAPSHOT_Y_IDX] = 12;
+        snapshot[VISIBILITY_SNAPSHOT_SCROLL_X_IDX] = 8;
+        snapshot[VISIBILITY_SNAPSHOT_SCROLL_Y_IDX] = 9;
+        snapshot[VISIBILITY_SNAPSHOT_LIGHT_IDX] = 0x0A;
+        snapshot[VISIBILITY_SNAPSHOT_TILES_OFFSET] = 0x11;
+        let center = VISIBILITY_SNAPSHOT_TILES_OFFSET
+            + (VIEWPORT_VISIBILITY_HEIGHT / 2) * VIEWPORT_VISIBILITY_WIDTH
+            + VIEWPORT_VISIBILITY_WIDTH / 2;
+        snapshot[center] = 0x22;
+        snapshot[VISIBILITY_SNAPSHOT_READY_OFFSET] = VISIBILITY_SNAPSHOT_READY_MARKER;
+        mock.set_bytes(snapshot_addr, &snapshot);
+
+        let state = read_map_state_with_visibility_snapshot(&mock, 0, Some(snapshot_addr)).unwrap();
+        let visibility = state.visibility_tiles.unwrap();
+        assert_eq!(visibility[0], 0x11);
+        assert_eq!(
+            visibility[(VIEWPORT_VISIBILITY_HEIGHT / 2) * VIEWPORT_VISIBILITY_WIDTH
+                + VIEWPORT_VISIBILITY_WIDTH / 2],
+            0x22
+        );
+    }
+
+    #[test]
+    fn stale_visibility_snapshot_is_ignored_when_metadata_mismatches() {
+        let snapshot_addr = 0x2F000;
+        let mock = MockMemory::new(snapshot_addr + VISIBILITY_SNAPSHOT_TOTAL_LEN + 0x100);
+
+        let base = SAVE_BASE;
+        mock.write_u8(base + MAP_LOCATION, 2).unwrap();
+        mock.write_u8(base + MAP_Z, 0).unwrap();
+        mock.write_u8(base + MAP_X, 10).unwrap();
+        mock.write_u8(base + MAP_Y, 12).unwrap();
+        mock.write_u8(base + MAP_TRANSPORT, 0).unwrap();
+        mock.write_u8(base + MAP_SCROLL_X, 8).unwrap();
+        mock.write_u8(base + MAP_SCROLL_Y, 9).unwrap();
+        mock.write_u8(base + LIGHT_INTENSITY, 0x0A).unwrap();
+
+        for i in 0..MAP_TILES_LEN {
+            mock.write_u8(base + MAP_TILES + i, 0x05).unwrap();
+        }
+        for row in 0..VIEWPORT_VISIBILITY_HEIGHT {
+            for col in 0..VIEWPORT_VISIBILITY_STRIDE {
+                let value = if col < VIEWPORT_VISIBILITY_WIDTH {
+                    ((row as u8) << 4) | col as u8
+                } else {
+                    0xEE
+                };
+                mock.write_u8(
+                    ds_addr(0, VIEWPORT_VISIBILITY_GRID) + row * VIEWPORT_VISIBILITY_STRIDE + col,
+                    value,
+                )
+                .unwrap();
+            }
+        }
+
+        let mut snapshot = [0u8; VISIBILITY_SNAPSHOT_TOTAL_LEN];
+        snapshot[VISIBILITY_SNAPSHOT_LOCATION_IDX] = 2;
+        snapshot[VISIBILITY_SNAPSHOT_Z_IDX] = 0;
+        snapshot[VISIBILITY_SNAPSHOT_X_IDX] = 99; // mismatch
+        snapshot[VISIBILITY_SNAPSHOT_Y_IDX] = 12;
+        snapshot[VISIBILITY_SNAPSHOT_SCROLL_X_IDX] = 8;
+        snapshot[VISIBILITY_SNAPSHOT_SCROLL_Y_IDX] = 9;
+        snapshot[VISIBILITY_SNAPSHOT_LIGHT_IDX] = 0x0A;
+        snapshot[VISIBILITY_SNAPSHOT_TILES_OFFSET] = 0x77;
+        snapshot[VISIBILITY_SNAPSHOT_READY_OFFSET] = VISIBILITY_SNAPSHOT_READY_MARKER;
+        mock.set_bytes(snapshot_addr, &snapshot);
+
+        let state = read_map_state_with_visibility_snapshot(&mock, 0, Some(snapshot_addr)).unwrap();
+        let visibility = state.visibility_tiles.unwrap();
+        assert_eq!(visibility[0], 0x00);
+        assert_eq!(visibility[VIEWPORT_VISIBILITY_WIDTH - 1], 0x0A);
+    }
+
+    #[test]
+    fn visibility_reader_waits_for_matching_snapshot_before_raw_fallback() {
+        let snapshot_addr = 0x2F000;
+        let mock = SnapshotRetryMemory::new(
+            snapshot_addr + VISIBILITY_SNAPSHOT_TOTAL_LEN + 0x100,
+            snapshot_addr,
+            2,
+            {
+                let mut snapshot = [0u8; VISIBILITY_SNAPSHOT_TOTAL_LEN];
+                snapshot[VISIBILITY_SNAPSHOT_LOCATION_IDX] = 2;
+                snapshot[VISIBILITY_SNAPSHOT_Z_IDX] = 0;
+                snapshot[VISIBILITY_SNAPSHOT_X_IDX] = 99;
+                snapshot[VISIBILITY_SNAPSHOT_Y_IDX] = 12;
+                snapshot[VISIBILITY_SNAPSHOT_SCROLL_X_IDX] = 8;
+                snapshot[VISIBILITY_SNAPSHOT_SCROLL_Y_IDX] = 9;
+                snapshot[VISIBILITY_SNAPSHOT_LIGHT_IDX] = 0x0A;
+                snapshot[VISIBILITY_SNAPSHOT_TILES_OFFSET] = 0x77;
+                snapshot[VISIBILITY_SNAPSHOT_READY_OFFSET] = VISIBILITY_SNAPSHOT_READY_MARKER;
+                snapshot
+            },
+            {
+                let mut snapshot = [0u8; VISIBILITY_SNAPSHOT_TOTAL_LEN];
+                snapshot[VISIBILITY_SNAPSHOT_LOCATION_IDX] = 2;
+                snapshot[VISIBILITY_SNAPSHOT_Z_IDX] = 0;
+                snapshot[VISIBILITY_SNAPSHOT_X_IDX] = 10;
+                snapshot[VISIBILITY_SNAPSHOT_Y_IDX] = 12;
+                snapshot[VISIBILITY_SNAPSHOT_SCROLL_X_IDX] = 8;
+                snapshot[VISIBILITY_SNAPSHOT_SCROLL_Y_IDX] = 9;
+                snapshot[VISIBILITY_SNAPSHOT_LIGHT_IDX] = 0x0A;
+                snapshot[VISIBILITY_SNAPSHOT_TILES_OFFSET] = 0x11;
+                snapshot[VISIBILITY_SNAPSHOT_TILES_OFFSET
+                    + (VIEWPORT_VISIBILITY_HEIGHT / 2) * VIEWPORT_VISIBILITY_WIDTH
+                    + VIEWPORT_VISIBILITY_WIDTH / 2] = 0x22;
+                snapshot[VISIBILITY_SNAPSHOT_READY_OFFSET] = VISIBILITY_SNAPSHOT_READY_MARKER;
+                snapshot
+            },
+        );
+
+        let base = SAVE_BASE;
+        mock.write_u8(base + MAP_LOCATION, 2).unwrap();
+        mock.write_u8(base + MAP_Z, 0).unwrap();
+        mock.write_u8(base + MAP_X, 10).unwrap();
+        mock.write_u8(base + MAP_Y, 12).unwrap();
+        mock.write_u8(base + MAP_TRANSPORT, 0).unwrap();
+        mock.write_u8(base + MAP_SCROLL_X, 8).unwrap();
+        mock.write_u8(base + MAP_SCROLL_Y, 9).unwrap();
+        mock.write_u8(base + LIGHT_INTENSITY, 0x0A).unwrap();
+
+        for i in 0..MAP_TILES_LEN {
+            mock.write_u8(base + MAP_TILES + i, 0x05).unwrap();
+        }
+        for row in 0..VIEWPORT_VISIBILITY_HEIGHT {
+            for col in 0..VIEWPORT_VISIBILITY_STRIDE {
+                mock.write_u8(
+                    ds_addr(0, VIEWPORT_VISIBILITY_GRID) + row * VIEWPORT_VISIBILITY_STRIDE + col,
+                    0xFF,
+                )
+                .unwrap();
+            }
+        }
+
+        let state = read_map_state_with_visibility_snapshot(&mock, 0, Some(snapshot_addr)).unwrap();
+        let visibility = state.visibility_tiles.unwrap();
+        assert_eq!(visibility[0], 0x11);
+        assert_eq!(
+            visibility[(VIEWPORT_VISIBILITY_HEIGHT / 2) * VIEWPORT_VISIBILITY_WIDTH
+                + VIEWPORT_VISIBILITY_WIDTH / 2],
+            0x22
+        );
+        assert_eq!(mock.snapshot_reads.get(), 3);
+    }
+
+    #[test]
+    fn dominant_visibility_mask_prefers_latest_repeated_mask() {
+        let stable = [0xFF; VIEWPORT_VISIBILITY_LEN];
+        let mut transient = stable;
+        transient[0] = 0x05;
+        let mut updated = stable;
+        updated[VIEWPORT_VISIBILITY_WIDTH + 1] = 0x31;
+
+        let samples = [stable, transient, updated, transient];
+        let dominant = dominant_visibility_mask(&samples, 0xFF);
+        assert_eq!(dominant, Some((2, 3)));
+    }
+
+    #[test]
+    fn visibility_window_medoid_chooses_central_mask_when_every_sample_is_unique() {
+        let all_hidden = [0xFF; VIEWPORT_VISIBILITY_LEN];
+        let mut center_only = all_hidden;
+        center_only[(VIEWPORT_VISIBILITY_HEIGHT / 2) * VIEWPORT_VISIBILITY_WIDTH
+            + VIEWPORT_VISIBILITY_WIDTH / 2] = 0x31;
+        let mut center_and_east = center_only;
+        center_and_east[(VIEWPORT_VISIBILITY_HEIGHT / 2) * VIEWPORT_VISIBILITY_WIDTH
+            + VIEWPORT_VISIBILITY_WIDTH / 2
+            + 1] = 0x31;
+
+        let chosen =
+            select_visibility_window_medoid(&[all_hidden, center_only, center_and_east], 0xFF);
+        assert_eq!(chosen, center_only);
     }
 
     #[test]

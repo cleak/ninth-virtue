@@ -3,6 +3,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use egui::emath::GuiRounding;
 use egui::epaint::PaintCallbackInfo;
 use egui::{Color32, FontId, Pos2, Rect, Stroke, StrokeKind, vec2};
 
@@ -164,7 +165,7 @@ impl LabelFilters {
 struct OverworldOverlayOptions {
     cx: u8,
     cy: u8,
-    zoom: usize,
+    grid_dims: (usize, usize),
     show_labels: bool,
     label_filters: LabelFilters,
 }
@@ -185,6 +186,7 @@ enum GridSource {
 struct GridCacheKey {
     center: (u8, u8),
     zoom: usize,
+    grid_dims: (usize, usize),
     source: GridSource,
     local_map: Option<(LocationType, u8)>,
     outdoor_z: Option<u8>,
@@ -425,6 +427,15 @@ pub fn show(
     let zoom = state.zoom;
     let cx = map.x;
     let cy = map.y;
+    let panel_rect = ui
+        .available_rect_before_wrap()
+        .round_to_pixels(ui.pixels_per_point());
+    let panel_size = panel_rect.size();
+    let target_grid_dims = if is_outdoor && world_map.is_some() {
+        outdoor_grid_dims_for_panel(panel_size, zoom)
+    } else {
+        local_scene_grid_dims(&map)
+    };
     let grid_source = if is_outdoor && world_map.is_some() {
         GridSource::Outdoor
     } else {
@@ -433,6 +444,7 @@ pub fn show(
     let grid_key = GridCacheKey {
         center: (cx, cy),
         zoom,
+        grid_dims: target_grid_dims,
         source: grid_source,
         local_map: (!is_outdoor).then_some((map.location, map.z)),
         outdoor_z: is_outdoor.then_some(map.z),
@@ -446,9 +458,16 @@ pub fn show(
     let (grid_dims, player_tile, fog_data) = if needs_update {
         let (grid_data, grid_w, grid_h, player_tile) =
             if let Some(wm) = world_map.filter(|_| is_outdoor) {
-                let grid = extract_outdoor_grid(wm, cx, cy, zoom, map.z);
-                let half = zoom as f32 / 2.0;
-                (grid, zoom as u32, zoom as u32, [half, half])
+                let grid = extract_outdoor_grid(wm, cx, cy, target_grid_dims, map.z);
+                (
+                    grid,
+                    target_grid_dims.0 as u32,
+                    target_grid_dims.1 as u32,
+                    [
+                        target_grid_dims.0 as f32 / 2.0,
+                        target_grid_dims.1 as f32 / 2.0,
+                    ],
+                )
             } else {
                 extract_local_scene_grid(&map)
             };
@@ -462,7 +481,7 @@ pub fn show(
             grid_w as usize,
             grid_h as usize,
         );
-        let fog_data = build_fog_texture(state, &map, grid_source, (grid_w, grid_h), zoom);
+        let fog_data = build_fog_texture(state, &map, grid_source, (grid_w, grid_h));
 
         let mut gpu = state.gpu.lock().unwrap();
         gpu.grid_data = grid_data;
@@ -481,7 +500,7 @@ pub fn show(
             let gpu = state.gpu.lock().unwrap();
             (gpu.grid_dims, gpu.player_tile)
         };
-        let fog_data = build_fog_texture(state, &map, grid_source, grid_dims, zoom);
+        let fog_data = build_fog_texture(state, &map, grid_source, grid_dims);
 
         let mut gpu = state.gpu.lock().unwrap();
         if gpu.fog_data != fog_data {
@@ -492,72 +511,75 @@ pub fn show(
         (grid_dims, player_tile, fog_data)
     };
 
-    // Allocate a centered square region for the minimap
-    let avail = ui.available_size();
-    let side = avail.x.min(avail.y);
+    let _response = ui.allocate_rect(panel_rect, egui::Sense::hover());
+    let map_rect = if matches!(grid_source, GridSource::Outdoor) {
+        fit_rect_to_grid(panel_rect, (grid_dims.0 as usize, grid_dims.1 as usize))
+            .round_to_pixels(ui.pixels_per_point())
+    } else {
+        panel_rect
+    };
+    if (panel_rect.width() - map_rect.width()).abs() > f32::EPSILON
+        || (panel_rect.height() - map_rect.height()).abs() > f32::EPSILON
+    {
+        ui.painter()
+            .rect_filled(panel_rect, 0.0, Color32::from_rgb(4, 4, 4));
+    }
 
-    // Issue paint callback inside centered layout
     let gpu = state.gpu.clone();
     let raw_atlas = state.raw_atlas.clone().unwrap();
+    let callback = egui_glow::CallbackFn::new(move |info: PaintCallbackInfo, painter| {
+        let gl = painter.gl();
+        let mut gpu = gpu.lock().unwrap();
 
-    ui.vertical_centered(|ui| {
-        let (rect, _response) =
-            ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
-
-        let callback = egui_glow::CallbackFn::new(move |info: PaintCallbackInfo, painter| {
-            let gl = painter.gl();
-            let mut gpu = gpu.lock().unwrap();
-
-            // Lazy-init: create renderer and upload atlas on first callback
-            if gpu.renderer.is_none() {
-                gpu.renderer = Some(MinimapGl::new(gl, &raw_atlas));
-                // Force grid upload on first frame
-                gpu.grid_dirty = true;
-                gpu.fog_dirty = true;
-            }
-
-            // Upload grid and objects textures if dirty
-            if gpu.grid_dirty {
-                let renderer = gpu.renderer.as_ref().unwrap();
-                renderer.update_grid(gl, &gpu.grid_data, gpu.grid_dims.0, gpu.grid_dims.1);
-                renderer.update_objects(gl, &gpu.objects_data, gpu.grid_dims.0, gpu.grid_dims.1);
-                renderer.update_lowpass(gl, &gpu.lowpass_data, gpu.grid_dims.0, gpu.grid_dims.1);
-                gpu.grid_dirty = false;
-            }
-            if gpu.fog_dirty {
-                let renderer = gpu.renderer.as_ref().unwrap();
-                renderer.update_fog(gl, &gpu.fog_data, gpu.grid_dims.0, gpu.grid_dims.1);
-                gpu.fog_dirty = false;
-            }
-
-            let grid_size = [gpu.grid_dims.0 as f32, gpu.grid_dims.1 as f32];
-            gpu.renderer.as_ref().unwrap().paint(gl, &info, grid_size);
-        });
-
-        ui.painter().add(egui::PaintCallback {
-            rect,
-            callback: Arc::new(callback),
-        });
-
-        if let Some(wm) = world_map.filter(|_| is_outdoor && !is_underworld) {
-            let overlay = OverworldOverlayOptions {
-                cx,
-                cy,
-                zoom,
-                show_labels: state.show_labels,
-                label_filters: state.label_filters,
-            };
-            paint_overworld_overlay(
-                ui,
-                rect,
-                wm,
-                overlay,
-                state.fog_enabled().then_some(fog_data.as_slice()),
-            );
+        // Lazy-init: create renderer and upload atlas on first callback
+        if gpu.renderer.is_none() {
+            gpu.renderer = Some(MinimapGl::new(gl, &raw_atlas));
+            // Force grid upload on first frame
+            gpu.grid_dirty = true;
+            gpu.fog_dirty = true;
         }
 
-        paint_player_marker(ui, rect, grid_dims, player_tile, None);
+        // Upload grid and objects textures if dirty
+        if gpu.grid_dirty {
+            let renderer = gpu.renderer.as_ref().unwrap();
+            renderer.update_grid(gl, &gpu.grid_data, gpu.grid_dims.0, gpu.grid_dims.1);
+            renderer.update_objects(gl, &gpu.objects_data, gpu.grid_dims.0, gpu.grid_dims.1);
+            renderer.update_lowpass(gl, &gpu.lowpass_data, gpu.grid_dims.0, gpu.grid_dims.1);
+            gpu.grid_dirty = false;
+        }
+        if gpu.fog_dirty {
+            let renderer = gpu.renderer.as_ref().unwrap();
+            renderer.update_fog(gl, &gpu.fog_data, gpu.grid_dims.0, gpu.grid_dims.1);
+            gpu.fog_dirty = false;
+        }
+
+        let grid_size = [gpu.grid_dims.0 as f32, gpu.grid_dims.1 as f32];
+        gpu.renderer.as_ref().unwrap().paint(gl, &info, grid_size);
     });
+
+    ui.painter().add(egui::PaintCallback {
+        rect: map_rect,
+        callback: Arc::new(callback),
+    });
+
+    if let Some(wm) = world_map.filter(|_| is_outdoor && !is_underworld) {
+        let overlay = OverworldOverlayOptions {
+            cx,
+            cy,
+            grid_dims: (grid_dims.0 as usize, grid_dims.1 as usize),
+            show_labels: state.show_labels,
+            label_filters: state.label_filters,
+        };
+        paint_overworld_overlay(
+            ui,
+            map_rect,
+            wm,
+            overlay,
+            state.fog_enabled().then_some(fog_data.as_slice()),
+        );
+    }
+
+    paint_player_marker(ui, map_rect, grid_dims, player_tile, None);
     show_fog_reset_confirmation(ui.ctx(), state);
 }
 
@@ -645,7 +667,7 @@ fn render_minimap_header(
                 if ui.small_button("\u{2795}").clicked() {
                     state.zoom = (state.zoom * 3 / 4).max(ZOOM_MIN);
                 }
-                ui.label(format!("{}x{}", state.zoom, state.zoom));
+                ui.label(format!("Zoom {}", state.zoom));
                 ui.separator();
                 if fog_supported {
                     let mut fog_enabled = state.fog_enabled();
@@ -730,16 +752,22 @@ fn show_fog_reset_confirmation(ctx: &egui::Context, state: &mut MinimapState) {
     }
 }
 
-/// Extract a zoom x zoom window from the active outdoor world centered on
-/// (cx, cy), wrapping at 256.
-fn extract_outdoor_grid(world: &WorldMap, cx: u8, cy: u8, zoom: usize, z: u8) -> Vec<u8> {
-    let half = zoom as i32 / 2;
-    let mut grid = vec![0u8; zoom * zoom];
-    for vy in 0..zoom {
-        for vx in 0..zoom {
-            let wx = (cx as i32 - half + vx as i32).rem_euclid(256) as u8;
-            let wy = (cy as i32 - half + vy as i32).rem_euclid(256) as u8;
-            grid[vy * zoom + vx] = world.outdoor_tile(z, wx, wy);
+/// Extract a rectangular outdoor window centered on (cx, cy), wrapping at 256.
+fn extract_outdoor_grid(
+    world: &WorldMap,
+    cx: u8,
+    cy: u8,
+    grid_dims: (usize, usize),
+    z: u8,
+) -> Vec<u8> {
+    let half_w = grid_dims.0 as i32 / 2;
+    let half_h = grid_dims.1 as i32 / 2;
+    let mut grid = vec![0u8; grid_dims.0 * grid_dims.1];
+    for vy in 0..grid_dims.1 {
+        for vx in 0..grid_dims.0 {
+            let wx = (cx as i32 - half_w + vx as i32).rem_euclid(256) as u8;
+            let wy = (cy as i32 - half_h + vy as i32).rem_euclid(256) as u8;
+            grid[vy * grid_dims.0 + vx] = world.outdoor_tile(z, wx, wy);
         }
     }
     grid
@@ -765,6 +793,45 @@ fn linearize_chunked_grid(tiles: &[u8; 1024]) -> Vec<u8> {
 /// Decode a plain 32x32 row-major MAP_TILES window.
 fn extract_row_major_grid(tiles: &[u8; 1024]) -> Vec<u8> {
     tiles.to_vec()
+}
+
+fn local_scene_grid_dims(map: &MapState) -> (usize, usize) {
+    match map.location.tile_grid_encoding() {
+        TileGridEncoding::Chunked16x16 | TileGridEncoding::RowMajor32 => (32, 32),
+        TileGridEncoding::Dungeon8x8 => (DUNGEON_LEVEL_WIDTH, DUNGEON_LEVEL_HEIGHT),
+        TileGridEncoding::Combat11x11Stride32 => (COMBAT_TERRAIN_WIDTH, COMBAT_TERRAIN_HEIGHT),
+    }
+}
+
+fn outdoor_grid_dims_for_panel(panel_size: egui::Vec2, zoom: usize) -> (usize, usize) {
+    let rows = zoom.clamp(ZOOM_MIN, ZOOM_MAX);
+    if panel_size.x <= 0.0 || panel_size.y <= 0.0 {
+        return (rows, rows);
+    }
+
+    let panel_w = panel_size.x.round().max(1.0) as usize;
+    let panel_h = panel_size.y.round().max(1.0) as usize;
+    let cols = rows
+        .saturating_mul(panel_w)
+        .checked_div(panel_h)
+        .unwrap_or(0);
+    let cols = cols.clamp(1, 256);
+    // Keep the outdoor view on an odd number of columns so the player's tile
+    // lands on the true horizontal center instead of straddling two cells.
+    let cols = match cols {
+        1 => 1,
+        256 => 255,
+        cols if cols % 2 == 1 => cols,
+        cols => cols + 1,
+    };
+    (cols, rows)
+}
+
+fn fit_rect_to_grid(bounds: Rect, grid_dims: (usize, usize)) -> Rect {
+    let grid_w = grid_dims.0.max(1) as f32;
+    let grid_h = grid_dims.1.max(1) as f32;
+    let scale = (bounds.width() / grid_w).min(bounds.height() / grid_h);
+    Rect::from_center_size(bounds.center(), vec2(grid_w * scale, grid_h * scale))
 }
 
 /// Decode the current non-overworld scene into a renderable grid plus player position.
@@ -826,7 +893,6 @@ fn build_fog_texture(
     map: &MapState,
     grid_source: GridSource,
     grid_dims: (u32, u32),
-    zoom: usize,
 ) -> Vec<u8> {
     let grid_dims = (grid_dims.0 as usize, grid_dims.1 as usize);
     let len = grid_dims.0 * grid_dims.1;
@@ -835,7 +901,7 @@ fn build_fog_texture(
     };
 
     let fog_enabled = state.fog_enabled();
-    let projection = FogProjection::new(map, scene, grid_source, grid_dims, zoom);
+    let projection = FogProjection::new(map, scene, grid_source, grid_dims);
     let visible_scene_coords = projection.visible_scene_coords();
     state.fog.record_visible_tiles(scene, &visible_scene_coords);
     let explored = state.fog.scene_data(scene);
@@ -872,7 +938,6 @@ struct FogProjection<'a> {
     scene: FogScene,
     grid_source: GridSource,
     grid_dims: (usize, usize),
-    zoom: usize,
 }
 
 impl<'a> FogProjection<'a> {
@@ -881,14 +946,12 @@ impl<'a> FogProjection<'a> {
         scene: FogScene,
         grid_source: GridSource,
         grid_dims: (usize, usize),
-        zoom: usize,
     ) -> Self {
         Self {
             map,
             scene,
             grid_source,
             grid_dims,
-            zoom,
         }
     }
 
@@ -936,10 +999,11 @@ impl<'a> FogProjection<'a> {
         match self.scene {
             FogScene::Britannia | FogScene::Underworld => match self.grid_source {
                 GridSource::Outdoor => {
-                    let half = self.zoom as i32 / 2;
+                    let half_w = self.grid_dims.0 as i32 / 2;
+                    let half_h = self.grid_dims.1 as i32 / 2;
                     Some((
-                        (self.map.x as i32 - half + grid_x as i32).rem_euclid(256) as usize,
-                        (self.map.y as i32 - half + grid_y as i32).rem_euclid(256) as usize,
+                        (self.map.x as i32 - half_w + grid_x as i32).rem_euclid(256) as usize,
+                        (self.map.y as i32 - half_h + grid_y as i32).rem_euclid(256) as usize,
                     ))
                 }
                 GridSource::Local => Some((
@@ -956,10 +1020,11 @@ impl<'a> FogProjection<'a> {
             FogScene::Britannia | FogScene::Underworld => {
                 let (top_left_x, top_left_y) = match self.grid_source {
                     GridSource::Outdoor => {
-                        let half = self.zoom as i32 / 2;
+                        let half_w = self.grid_dims.0 as i32 / 2;
+                        let half_h = self.grid_dims.1 as i32 / 2;
                         (
-                            (self.map.x as i32 - half).rem_euclid(256) as usize,
-                            (self.map.y as i32 - half).rem_euclid(256) as usize,
+                            (self.map.x as i32 - half_w).rem_euclid(256) as usize,
+                            (self.map.y as i32 - half_h).rem_euclid(256) as usize,
                         )
                     }
                     GridSource::Local => (self.map.scroll_x as usize, self.map.scroll_y as usize),
@@ -975,70 +1040,68 @@ impl<'a> FogProjection<'a> {
 }
 
 fn show_dungeon_map(ui: &mut egui::Ui, state: &mut MinimapState, map: &MapState) {
-    let avail = ui.available_size();
-    let side = avail.x.min(avail.y);
+    let rect = ui
+        .available_rect_before_wrap()
+        .round_to_pixels(ui.pixels_per_point());
+    let _response = ui.allocate_rect(rect, egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    let grid = extract_dungeon_grid(&map.tiles);
+    let panel_rounding = 10.0;
+    let frame_margin = (rect.width().min(rect.height()) * 0.014).max(4.0);
+    let map_rect = rect.shrink(frame_margin);
+    let player_tile = local_scene_player_tile(map);
 
-    ui.vertical_centered(|ui| {
-        let (rect, _response) =
-            ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
-        let painter = ui.painter_at(rect);
-        let grid = extract_dungeon_grid(&map.tiles);
-        let panel_rounding = 10.0;
-        let map_rect = rect.shrink((side * 0.014).max(4.0));
-        let player_tile = local_scene_player_tile(map);
-
-        painter.rect_filled(rect, panel_rounding, Color32::from_rgb(7, 10, 13));
-        painter.rect_stroke(
-            rect,
-            panel_rounding,
-            Stroke::new(1.0, Color32::from_rgb(32, 38, 46)),
-            StrokeKind::Inside,
-        );
-        painter.rect_filled(map_rect, 7.0, Color32::from_rgb(12, 16, 20));
-        painter.rect_stroke(
-            map_rect,
-            7.0,
-            Stroke::new(1.0, Color32::from_rgb(18, 24, 30)),
-            StrokeKind::Inside,
-        );
-        let map_painter = ui.painter_at(map_rect);
-        match state.dungeon_primary_view() {
-            DungeonPrimaryView::Centered => {
-                paint_centered_dungeon_cells(&map_painter, map_rect, &grid, player_tile);
-                if state.show_dungeon_corner_view() {
-                    paint_dungeon_overview_inset(
-                        ui,
-                        map_rect,
-                        &grid,
-                        player_tile,
-                        map.dungeon_facing,
-                        DungeonPrimaryView::Fixed,
-                    );
-                }
-                paint_centered_dungeon_player_marker(ui, map_rect, map.dungeon_facing);
-            }
-            DungeonPrimaryView::Fixed => {
-                paint_fixed_dungeon_cells(&map_painter, map_rect, &grid);
-                if state.show_dungeon_corner_view() {
-                    paint_dungeon_overview_inset(
-                        ui,
-                        map_rect,
-                        &grid,
-                        player_tile,
-                        map.dungeon_facing,
-                        DungeonPrimaryView::Centered,
-                    );
-                }
-                paint_player_marker(
+    painter.rect_filled(rect, panel_rounding, Color32::from_rgb(7, 10, 13));
+    painter.rect_stroke(
+        rect,
+        panel_rounding,
+        Stroke::new(1.0, Color32::from_rgb(32, 38, 46)),
+        StrokeKind::Inside,
+    );
+    painter.rect_filled(map_rect, 7.0, Color32::from_rgb(12, 16, 20));
+    painter.rect_stroke(
+        map_rect,
+        7.0,
+        Stroke::new(1.0, Color32::from_rgb(18, 24, 30)),
+        StrokeKind::Inside,
+    );
+    let map_painter = ui.painter_at(map_rect);
+    match state.dungeon_primary_view() {
+        DungeonPrimaryView::Centered => {
+            paint_centered_dungeon_cells(&map_painter, map_rect, &grid, player_tile);
+            if state.show_dungeon_corner_view() {
+                paint_dungeon_overview_inset(
                     ui,
                     map_rect,
-                    (DUNGEON_LEVEL_WIDTH as u32, DUNGEON_LEVEL_HEIGHT as u32),
+                    &grid,
                     player_tile,
                     map.dungeon_facing,
+                    DungeonPrimaryView::Fixed,
                 );
             }
+            paint_centered_dungeon_player_marker(ui, map_rect, map.dungeon_facing);
         }
-    });
+        DungeonPrimaryView::Fixed => {
+            paint_fixed_dungeon_cells(&map_painter, map_rect, &grid);
+            if state.show_dungeon_corner_view() {
+                paint_dungeon_overview_inset(
+                    ui,
+                    map_rect,
+                    &grid,
+                    player_tile,
+                    map.dungeon_facing,
+                    DungeonPrimaryView::Centered,
+                );
+            }
+            paint_player_marker(
+                ui,
+                map_rect,
+                (DUNGEON_LEVEL_WIDTH as u32, DUNGEON_LEVEL_HEIGHT as u32),
+                player_tile,
+                map.dungeon_facing,
+            );
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1543,7 +1606,8 @@ fn build_objects_overlay(
         "dungeon walking maps use the abstract painter path instead of sprite overlays"
     );
     let mut overlay = vec![0u8; grid_w * grid_h];
-    let half = grid_w as i32 / 2;
+    let half_w = grid_w as i32 / 2;
+    let half_h = grid_h as i32 / 2;
     let outdoor = map.is_outdoor();
     let combat = matches!(map.location, LocationType::Combat(_));
 
@@ -1553,8 +1617,8 @@ fn build_objects_overlay(
         }
 
         let (gx, gy) = if outdoor {
-            let vx = (obj.x as i32 - map.x as i32 + half).rem_euclid(256);
-            let vy = (obj.y as i32 - map.y as i32 + half).rem_euclid(256);
+            let vx = (obj.x as i32 - map.x as i32 + half_w).rem_euclid(256);
+            let vy = (obj.y as i32 - map.y as i32 + half_h).rem_euclid(256);
             (vx, vy)
         } else if combat {
             // Combat actors already use battlefield-local coordinates even when
@@ -1693,7 +1757,7 @@ fn paint_overworld_overlay(
         rect,
         overlay.cx,
         overlay.cy,
-        overlay.zoom,
+        overlay.grid_dims,
     );
     if visible.is_empty() {
         return;
@@ -1721,7 +1785,7 @@ fn paint_overworld_overlay(
         return;
     }
 
-    let font_size = match overlay.zoom {
+    let font_size = match overlay.grid_dims.1 {
         0..=48 => 12.0,
         49..=96 => 11.0,
         _ => 10.0,
@@ -1764,15 +1828,16 @@ fn is_overworld_location_revealed(
     let Some(fog_visibility) = fog_visibility else {
         return true;
     };
-    let half = overlay.zoom as i32 / 2;
-    let top_left_x = (overlay.cx as i32 - half).rem_euclid(256) as usize;
-    let top_left_y = (overlay.cy as i32 - half).rem_euclid(256) as usize;
+    let half_w = overlay.grid_dims.0 as i32 / 2;
+    let half_h = overlay.grid_dims.1 as i32 / 2;
+    let top_left_x = (overlay.cx as i32 - half_w).rem_euclid(256) as usize;
+    let top_left_y = (overlay.cy as i32 - half_h).rem_euclid(256) as usize;
     let grid_x = (location.x as usize + 256 - top_left_x) % 256;
     let grid_y = (location.y as usize + 256 - top_left_y) % 256;
-    if grid_x >= overlay.zoom || grid_y >= overlay.zoom {
+    if grid_x >= overlay.grid_dims.0 || grid_y >= overlay.grid_dims.1 {
         return false;
     }
-    fog_visibility[grid_y * overlay.zoom + grid_x] != FOG_VISIBILITY_UNSEEN
+    fog_visibility[grid_y * overlay.grid_dims.0 + grid_x] != FOG_VISIBILITY_UNSEEN
 }
 
 /// Paint the current player location with a screen-space marker that keeps a
@@ -1901,23 +1966,25 @@ fn visible_world_locations<'a>(
     rect: Rect,
     cx: u8,
     cy: u8,
-    zoom: usize,
+    grid_dims: (usize, usize),
 ) -> Vec<VisibleWorldLocation<'a>> {
-    let half = zoom as i32 / 2;
+    let half_w = grid_dims.0 as i32 / 2;
+    let half_h = grid_dims.1 as i32 / 2;
     let mut visible = Vec::new();
 
     for location in locations {
         let dx = wrapped_delta(location.x, cx) as i32;
         let dy = wrapped_delta(location.y, cy) as i32;
-        let tile_x = dx + half;
-        let tile_y = dy + half;
-        if tile_x < 0 || tile_y < 0 || tile_x >= zoom as i32 || tile_y >= zoom as i32 {
+        let tile_x = dx + half_w;
+        let tile_y = dy + half_h;
+        if tile_x < 0 || tile_y < 0 || tile_x >= grid_dims.0 as i32 || tile_y >= grid_dims.1 as i32
+        {
             continue;
         }
 
         let point = Pos2::new(
-            rect.left() + (tile_x as f32 + 0.5) / zoom as f32 * rect.width(),
-            rect.top() + (tile_y as f32 + 0.5) / zoom as f32 * rect.height(),
+            rect.left() + (tile_x as f32 + 0.5) / grid_dims.0 as f32 * rect.width(),
+            rect.top() + (tile_y as f32 + 0.5) / grid_dims.1 as f32 * rect.height(),
         );
         visible.push(VisibleWorldLocation {
             location,
@@ -2016,10 +2083,44 @@ mod tests {
             y: 250,
         }];
 
-        let visible = visible_world_locations(&locations, rect, 250, 250, 16);
+        let visible = visible_world_locations(&locations, rect, 250, 250, (16, 16));
         assert_eq!(visible.len(), 1);
         assert!(visible[0].point.x > rect.center().x);
         assert!((visible[0].point.y - rect.center().y).abs() <= rect.height() / 16.0);
+    }
+
+    #[test]
+    fn outdoor_grid_dims_expand_to_match_wide_panel() {
+        assert_eq!(
+            outdoor_grid_dims_for_panel(vec2(400.0, 200.0), 48),
+            (97, 48)
+        );
+    }
+
+    #[test]
+    fn outdoor_grid_dims_clamp_before_world_wrap_repeats() {
+        assert_eq!(
+            outdoor_grid_dims_for_panel(vec2(900.0, 180.0), 64),
+            (255, 64)
+        );
+    }
+
+    #[test]
+    fn outdoor_grid_dims_prefer_odd_columns_for_true_centering() {
+        assert_eq!(
+            outdoor_grid_dims_for_panel(vec2(600.0, 200.0), 48),
+            (145, 48)
+        );
+    }
+
+    #[test]
+    fn fit_rect_to_grid_adds_side_bars_when_grid_hits_wrap_limit() {
+        let bounds = Rect::from_min_size(Pos2::new(0.0, 0.0), vec2(900.0, 180.0));
+        let fitted = fit_rect_to_grid(bounds, (255, 64));
+
+        assert_eq!(fitted.height(), bounds.height());
+        assert!(fitted.width() < bounds.width());
+        assert_eq!(fitted.center().y, bounds.center().y);
     }
 
     #[test]
@@ -2091,6 +2192,7 @@ mod tests {
             Some(GridCacheKey {
                 center: (42, 43),
                 zoom: 32,
+                grid_dims: (32, 32),
                 source: GridSource::Local,
                 local_map: Some((LocationType::Town(1), 0)),
                 outdoor_z: None,
@@ -2098,6 +2200,7 @@ mod tests {
             GridCacheKey {
                 center: (42, 43),
                 zoom: 32,
+                grid_dims: (32, 32),
                 source: GridSource::Outdoor,
                 local_map: None,
                 outdoor_z: Some(0),
@@ -2108,6 +2211,7 @@ mod tests {
             Some(GridCacheKey {
                 center: (42, 43),
                 zoom: 32,
+                grid_dims: (32, 32),
                 source: GridSource::Outdoor,
                 local_map: None,
                 outdoor_z: Some(0),
@@ -2115,6 +2219,7 @@ mod tests {
             GridCacheKey {
                 center: (42, 43),
                 zoom: 32,
+                grid_dims: (32, 32),
                 source: GridSource::Outdoor,
                 local_map: None,
                 outdoor_z: Some(0),
@@ -2129,6 +2234,7 @@ mod tests {
             Some(GridCacheKey {
                 center: (12, 9),
                 zoom: 32,
+                grid_dims: (32, 32),
                 source: GridSource::Local,
                 local_map: Some((LocationType::Town(1), 0)),
                 outdoor_z: None,
@@ -2136,6 +2242,7 @@ mod tests {
             GridCacheKey {
                 center: (12, 9),
                 zoom: 32,
+                grid_dims: (32, 32),
                 source: GridSource::Local,
                 local_map: Some((LocationType::Town(2), 0)),
                 outdoor_z: None,
@@ -2146,6 +2253,7 @@ mod tests {
             Some(GridCacheKey {
                 center: (12, 9),
                 zoom: 32,
+                grid_dims: (32, 32),
                 source: GridSource::Local,
                 local_map: Some((LocationType::Dungeon(33), 0)),
                 outdoor_z: None,
@@ -2153,6 +2261,7 @@ mod tests {
             GridCacheKey {
                 center: (12, 9),
                 zoom: 32,
+                grid_dims: (32, 32),
                 source: GridSource::Local,
                 local_map: Some((LocationType::Dungeon(33), 1)),
                 outdoor_z: None,
@@ -2167,6 +2276,7 @@ mod tests {
             Some(GridCacheKey {
                 center: (99, 68),
                 zoom: 48,
+                grid_dims: (48, 48),
                 source: GridSource::Outdoor,
                 local_map: None,
                 outdoor_z: Some(0),
@@ -2174,9 +2284,33 @@ mod tests {
             GridCacheKey {
                 center: (99, 68),
                 zoom: 48,
+                grid_dims: (48, 48),
                 source: GridSource::Outdoor,
                 local_map: None,
                 outdoor_z: Some(0xFF),
+            },
+            false,
+        ));
+    }
+
+    #[test]
+    fn grid_dims_change_invalidates_cached_grid() {
+        assert!(needs_grid_refresh(
+            Some(GridCacheKey {
+                center: (99, 68),
+                zoom: 48,
+                grid_dims: (48, 48),
+                source: GridSource::Outdoor,
+                local_map: None,
+                outdoor_z: Some(0),
+            }),
+            GridCacheKey {
+                center: (99, 68),
+                zoom: 48,
+                grid_dims: (96, 48),
+                source: GridSource::Outdoor,
+                local_map: None,
+                outdoor_z: Some(0),
             },
             false,
         ));
@@ -2202,6 +2336,7 @@ mod tests {
         state.last_grid_key = Some(GridCacheKey {
             center: (1, 2),
             zoom: 32,
+            grid_dims: (32, 32),
             source: GridSource::Outdoor,
             local_map: None,
             outdoor_z: Some(0xFF),
@@ -2426,6 +2561,33 @@ mod tests {
     }
 
     #[test]
+    fn outdoor_objects_use_rectangular_grid_center() {
+        let map = MapState {
+            location: LocationType::Overworld,
+            z: 0,
+            x: 38,
+            y: 222,
+            dungeon_facing: None,
+            transport: 0,
+            scroll_x: 0,
+            scroll_y: 0,
+            tiles: [0; 1024],
+            combat_tiles: None,
+            visibility_tiles: None,
+            objects: Vec::new(),
+        };
+        let objects = vec![ObjectEntry {
+            tile: 17,
+            x: 38,
+            y: 222,
+            floor: 0,
+        }];
+
+        let overlay = build_objects_overlay(&objects, 96, 48, &map);
+        assert_eq!(overlay[24 * 96 + 48], 17);
+    }
+
+    #[test]
     fn dungeon_cell_classification_maps_structural_features() {
         assert_eq!(
             classify_dungeon_cell(0x10),
@@ -2582,11 +2744,34 @@ mod tests {
             objects: Vec::new(),
         };
         let projection =
-            FogProjection::new(&map, FogScene::Britannia, GridSource::Outdoor, (16, 16), 16);
+            FogProjection::new(&map, FogScene::Britannia, GridSource::Outdoor, (16, 16));
 
         assert_eq!(projection.scene_coord_for_grid_cell(0, 0), Some((250, 242)));
         assert_eq!(projection.grid_cell_for_scene_coord(2, 250), Some((8, 8)));
         assert_eq!(projection.grid_cell_for_scene_coord(1, 249), Some((7, 7)));
+    }
+
+    #[test]
+    fn fog_projection_uses_rectangular_outdoor_viewport_dimensions() {
+        let map = MapState {
+            location: LocationType::Overworld,
+            z: 0,
+            x: 2,
+            y: 250,
+            dungeon_facing: None,
+            transport: 0,
+            scroll_x: 0,
+            scroll_y: 0,
+            tiles: [0; 1024],
+            combat_tiles: None,
+            visibility_tiles: None,
+            objects: Vec::new(),
+        };
+        let projection =
+            FogProjection::new(&map, FogScene::Britannia, GridSource::Outdoor, (32, 16));
+
+        assert_eq!(projection.scene_coord_for_grid_cell(0, 0), Some((242, 242)));
+        assert_eq!(projection.grid_cell_for_scene_coord(2, 250), Some((16, 8)));
     }
 
     #[test]
@@ -2611,8 +2796,7 @@ mod tests {
             visibility_tiles: Some(visibility),
             objects: Vec::new(),
         };
-        let projection =
-            FogProjection::new(&map, FogScene::Local(2), GridSource::Local, (32, 32), 32);
+        let projection = FogProjection::new(&map, FogScene::Local(2), GridSource::Local, (32, 32));
 
         assert_eq!(projection.visible_scene_coords(), vec![(0, 0)]);
     }

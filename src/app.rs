@@ -469,6 +469,10 @@ impl UltimaCompanion {
         let pid = attached.process.pid;
         let mem: &dyn MemoryAccess = &attached.process.memory;
         let connected_status = format!("Connected to {} (PID {})", attached.process.name, pid);
+        let visibility_snapshot_addr = self
+            .patch_state
+            .as_ref()
+            .map(PatchState::visibility_snapshot_addr);
         let game_written = Self::refresh_cached_game_state_fields(
             CachedGameStateRefs {
                 party: &mut self.party,
@@ -482,6 +486,7 @@ impl UltimaCompanion {
             },
             mem,
             dos_base,
+            visibility_snapshot_addr,
             &connected_status,
         );
 
@@ -500,6 +505,7 @@ impl UltimaCompanion {
         state: CachedGameStateRefs<'_>,
         mem: &dyn MemoryAccess,
         dos_base: usize,
+        visibility_snapshot_addr: Option<usize>,
         connected_status: &str,
     ) -> bool {
         let CachedGameStateRefs {
@@ -552,7 +558,8 @@ impl UltimaCompanion {
             Err(e) => note_refresh_error(format!("Read frigates failed: {e}")),
         }
 
-        match map::read_map_state(mem, dos_base) {
+        match map::read_map_state_with_visibility_snapshot(mem, dos_base, visibility_snapshot_addr)
+        {
             Ok(ms) => minimap.map = Some(ms),
             Err(e) => note_refresh_error(format!("Read map failed: {e}")),
         }
@@ -1134,6 +1141,7 @@ mod tests {
             },
             &mem,
             0,
+            None,
             connected_status,
         );
 
@@ -1167,6 +1175,7 @@ mod tests {
             },
             &mem,
             0,
+            None,
             connected_status,
         );
         mem.set_bytes(char_addr(0, 0, CHAR_GENDER), &[u8::from(Gender::Male)]);
@@ -1183,6 +1192,7 @@ mod tests {
             },
             &mem,
             0,
+            None,
             connected_status,
         );
 
