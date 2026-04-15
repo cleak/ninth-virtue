@@ -207,9 +207,10 @@ pub struct MapState {
     /// Current 2D visibility window flattened to an 11x11 active region.
     ///
     /// The reader prefers a synchronized post-render snapshot captured inside
-    /// the game loop and falls back to repeated `DS:0xAB02` samples only when
-    /// that snapshot is unavailable or stale. Hidden cells read back as 0xFF.
-    /// Present only for overworld and 2D local scenes.
+    /// the game loop. When that synchronized path is unavailable, it falls
+    /// back to repeated `DS:0xAB02` samples; when the synchronized snapshot is
+    /// present but stale, visibility is withheld until a matching frame arrives.
+    /// Hidden cells read back as 0xFF. Present only for overworld and 2D local scenes.
     pub visibility_tiles: Option<[u8; VIEWPORT_VISIBILITY_LEN]>,
     /// Active objects on the map (NPCs, monsters, vehicles).
     /// Each entry has a tile byte (add 0x100 for the full tile index) and position.

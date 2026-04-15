@@ -343,9 +343,10 @@ Confirmed so far:
 - **Prefer reading live engine-produced buffers first, but only when they are stable.**
 - Keep using runtime capture to validate `DS:0x595A`, `DS:0xAD14`, `DS:0xAB02`,
   and `DS:0xAC64` before porting scene-specific logic.
-- Outdoor fog now reads the synchronized post-render snapshot first and falls
-  back to asynchronous `DS:0xAB02` sampling only when the snapshot is missing
-  or stale.
+- Outdoor fog now reads the synchronized post-render snapshot first. It falls
+  back to asynchronous `DS:0xAB02` sampling only when the synchronized path is
+  unavailable; stale synchronized snapshots are ignored until a matching frame
+  arrives.
 - Treat combat as out of scope for fog unless runtime capture disproves the
   current static conclusion that `DS:0xAD14` is already the fully materialized
   combat terrain grid.

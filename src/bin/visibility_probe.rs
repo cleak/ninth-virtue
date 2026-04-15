@@ -16,11 +16,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 use ninth_virtue::game::injection::{
-    self, VISIBILITY_SNAPSHOT_LIGHT_IDX, VISIBILITY_SNAPSHOT_LOCATION_IDX,
-    VISIBILITY_SNAPSHOT_READY_MARKER, VISIBILITY_SNAPSHOT_READY_OFFSET,
-    VISIBILITY_SNAPSHOT_SCROLL_X_IDX, VISIBILITY_SNAPSHOT_SCROLL_Y_IDX,
-    VISIBILITY_SNAPSHOT_TILES_OFFSET, VISIBILITY_SNAPSHOT_TOTAL_LEN, VISIBILITY_SNAPSHOT_X_IDX,
-    VISIBILITY_SNAPSHOT_Y_IDX, VISIBILITY_SNAPSHOT_Z_IDX,
+    self, VISIBILITY_SNAPSHOT_READY_MARKER, VISIBILITY_SNAPSHOT_READY_OFFSET,
+    VISIBILITY_SNAPSHOT_TILES_OFFSET, VISIBILITY_SNAPSHOT_TOTAL_LEN,
 };
 use ninth_virtue::game::map;
 use ninth_virtue::game::offsets::{
@@ -121,17 +118,15 @@ fn main() -> Result<()> {
             ds_addr(scan.dos_base, VIEWPORT_TERRAIN_FALLBACK_GRID),
             VIEWPORT_TERRAIN_FALLBACK_STRIDE,
         )?;
-        let snapshot = read_snapshot(mem, snapshot_addr, key)?;
+        let snapshot_tiles = read_snapshot_tiles(mem, snapshot_addr)?;
         let app_state =
             map::read_map_state_with_visibility_snapshot(mem, scan.dos_base, Some(snapshot_addr))?;
         let app_tiles = app_state.visibility_tiles;
 
-        let snapshot_tiles = snapshot.as_ref().map(|(_, tiles)| *tiles);
         let source = match (snapshot_tiles.as_ref(), app_tiles.as_ref()) {
             (Some(snapshot_tiles), Some(app_tiles)) if snapshot_tiles == app_tiles => "snapshot",
-            (_, Some(app_tiles)) if app_tiles == &raw_ab02 => "raw",
-            (_, Some(_)) => "other",
-            _ => "none",
+            (None, None) => "none",
+            _ => "mismatch",
         };
 
         let sample_hash = SampleHash {
@@ -284,11 +279,10 @@ fn read_active_grid(
     Ok(active)
 }
 
-fn read_snapshot(
+fn read_snapshot_tiles(
     mem: &dyn MemoryAccess,
     snapshot_addr: usize,
-    key: VisibilityKey,
-) -> Result<Option<(VisibilityKey, [u8; VIEWPORT_VISIBILITY_LEN])>> {
+) -> Result<Option<[u8; VIEWPORT_VISIBILITY_LEN]>> {
     let mut snapshot = [0u8; VISIBILITY_SNAPSHOT_TOTAL_LEN];
     mem.read_bytes(snapshot_addr, &mut snapshot)?;
 
@@ -296,27 +290,12 @@ fn read_snapshot(
         return Ok(None);
     }
 
-    let snapshot_key = VisibilityKey {
-        location_id: snapshot[VISIBILITY_SNAPSHOT_LOCATION_IDX],
-        z: snapshot[VISIBILITY_SNAPSHOT_Z_IDX],
-        x: snapshot[VISIBILITY_SNAPSHOT_X_IDX],
-        y: snapshot[VISIBILITY_SNAPSHOT_Y_IDX],
-        scroll_x: snapshot[VISIBILITY_SNAPSHOT_SCROLL_X_IDX],
-        scroll_y: snapshot[VISIBILITY_SNAPSHOT_SCROLL_Y_IDX],
-        light: snapshot[VISIBILITY_SNAPSHOT_LIGHT_IDX],
-    };
-
     let mut tiles = [0u8; VIEWPORT_VISIBILITY_LEN];
     tiles.copy_from_slice(
         &snapshot[VISIBILITY_SNAPSHOT_TILES_OFFSET
             ..VISIBILITY_SNAPSHOT_TILES_OFFSET + VIEWPORT_VISIBILITY_LEN],
     );
-
-    if snapshot_key != key {
-        return Ok(Some((snapshot_key, tiles)));
-    }
-
-    Ok(Some((snapshot_key, tiles)))
+    Ok(Some(tiles))
 }
 
 fn fnv1a64(bytes: &[u8]) -> u64 {
