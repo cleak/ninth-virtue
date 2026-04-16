@@ -17,7 +17,9 @@ pub fn show(ui: &mut egui::Ui, session: &Option<AudioSession>, volume: &mut f32,
 
     // Mute toggle button.
     let mute_label = if *muted { "🔇 Unmute" } else { "🔈 Mute" };
-    let button_size = egui::vec2(ui.available_width(), 24.0);
+    // Keep a consistent button height without stretching the control to the
+    // full card width.
+    let button_size = egui::vec2(0.0, 24.0);
 
     if ui
         .add_enabled(
