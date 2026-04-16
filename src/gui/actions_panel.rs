@@ -32,7 +32,9 @@ pub fn show(
     });
 
     let enabled = mem.is_some();
-    let button_size = egui::vec2(ui.available_width(), 24.0);
+    // Keep a consistent button height without stretching the controls to the
+    // full card width.
+    let button_size = egui::vec2(0.0, 24.0);
 
     if ui
         .add_enabled(

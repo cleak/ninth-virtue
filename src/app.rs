@@ -890,10 +890,9 @@ impl eframe::App for UltimaCompanion {
             });
         });
 
-        // --- Mini-map (fills all remaining space) ---
+        // --- Mini-map ---
         egui::CentralPanel::default().show_inside(ui, |ui| {
             gui::section_frame(ui).show(ui, |ui| {
-                ui.set_min_size(ui.available_size());
                 let dungeon_map_loaded = minimap
                     .map
                     .as_ref()

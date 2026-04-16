@@ -563,15 +563,23 @@ pub fn show(
         (grid_dims, player_tile, fog_data)
     };
 
-    let _response = ui.allocate_rect(panel_rect, egui::Sense::hover());
-    let map_rect = if matches!(grid_source, GridSource::Outdoor) {
-        fit_rect_to_grid(panel_rect, (grid_dims.0 as usize, grid_dims.1 as usize))
-            .round_to_pixels(ui.pixels_per_point())
+    let (layout_rect, map_rect) = if matches!(grid_source, GridSource::Outdoor) {
+        let map_rect = fit_rect_to_grid(panel_rect, (grid_dims.0 as usize, grid_dims.1 as usize))
+            .round_to_pixels(ui.pixels_per_point());
+        (panel_rect, map_rect)
     } else {
-        panel_rect
+        let map_rect = fit_local_scene_rect(
+            panel_rect,
+            (grid_dims.0 as usize, grid_dims.1 as usize),
+            zoom,
+        )
+        .round_to_pixels(ui.pixels_per_point());
+        (map_rect, map_rect)
     };
-    if (panel_rect.width() - map_rect.width()).abs() > f32::EPSILON
-        || (panel_rect.height() - map_rect.height()).abs() > f32::EPSILON
+    let _response = ui.allocate_rect(layout_rect, egui::Sense::hover());
+    if matches!(grid_source, GridSource::Outdoor)
+        && ((panel_rect.width() - map_rect.width()).abs() > f32::EPSILON
+            || (panel_rect.height() - map_rect.height()).abs() > f32::EPSILON)
     {
         ui.painter()
             .rect_filled(panel_rect, 0.0, Color32::from_rgb(4, 4, 4));
@@ -930,6 +938,17 @@ fn fit_rect_to_grid(bounds: Rect, grid_dims: (usize, usize)) -> Rect {
     let grid_h = grid_dims.1.max(1) as f32;
     let scale = (bounds.width() / grid_w).min(bounds.height() / grid_h);
     Rect::from_center_size(bounds.center(), vec2(grid_w * scale, grid_h * scale))
+}
+
+/// Fit local 2D scenes into the available panel without letting sparse grids
+/// expand far beyond the currently selected outdoor zoom scale.
+fn fit_local_scene_rect(bounds: Rect, grid_dims: (usize, usize), zoom: usize) -> Rect {
+    let grid_w = grid_dims.0.max(1) as f32;
+    let grid_h = grid_dims.1.max(1) as f32;
+    let fit_scale = (bounds.width() / grid_w).min(bounds.height() / grid_h);
+    let zoom_scale = bounds.height() / zoom.clamp(ZOOM_MIN, ZOOM_MAX) as f32;
+    let scale = fit_scale.min(zoom_scale);
+    egui::Align2::CENTER_TOP.align_size_within_rect(vec2(grid_w * scale, grid_h * scale), bounds)
 }
 
 /// Decode the current non-overworld scene into a renderable grid plus player position.
@@ -2264,6 +2283,26 @@ mod tests {
         assert_eq!(fitted.height(), bounds.height());
         assert!(fitted.width() < bounds.width());
         assert_eq!(fitted.center().y, bounds.center().y);
+    }
+
+    #[test]
+    fn fit_local_scene_rect_caps_combat_scale_from_zoom() {
+        let bounds = Rect::from_min_size(Pos2::new(0.0, 0.0), vec2(540.0, 270.0));
+        let fitted = fit_local_scene_rect(bounds, (11, 11), 27);
+
+        assert_eq!(fitted.top(), bounds.top());
+        assert_eq!(fitted.center().x, bounds.center().x);
+        assert_eq!(fitted.size(), vec2(110.0, 110.0));
+    }
+
+    #[test]
+    fn fit_local_scene_rect_still_fits_large_maps_when_zoom_would_overflow() {
+        let bounds = Rect::from_min_size(Pos2::new(0.0, 0.0), vec2(300.0, 200.0));
+        let fitted = fit_local_scene_rect(bounds, (32, 32), 11);
+
+        assert_eq!(fitted.top(), bounds.top());
+        assert_eq!(fitted.center().x, bounds.center().x);
+        assert_eq!(fitted.size(), vec2(200.0, 200.0));
     }
 
     #[test]
