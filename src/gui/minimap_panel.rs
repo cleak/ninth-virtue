@@ -133,6 +133,7 @@ struct LabelFilters {
     keeps: bool,
     dungeons: bool,
     shrines: bool,
+    landmarks: bool,
 }
 
 impl Default for LabelFilters {
@@ -144,6 +145,7 @@ impl Default for LabelFilters {
             keeps: true,
             dungeons: true,
             shrines: true,
+            landmarks: true,
         }
     }
 }
@@ -157,12 +159,14 @@ impl LabelFilters {
             WorldLabelCategory::Keep => self.keeps,
             WorldLabelCategory::Dungeon => self.dungeons,
             WorldLabelCategory::Shrine => self.shrines,
+            WorldLabelCategory::Landmark => self.landmarks,
         }
     }
 }
 
 #[derive(Debug, Clone, Copy)]
-struct OverworldOverlayOptions {
+struct OutdoorOverlayOptions {
+    z: u8,
     cx: u8,
     cy: u8,
     grid_dims: (usize, usize),
@@ -431,7 +435,6 @@ pub fn show(
     };
     let is_dungeon = matches!(map.location, LocationType::Dungeon(_));
     let is_outdoor = map.is_outdoor();
-    let is_underworld = map.is_underworld();
 
     render_minimap_header(ui, state, &map, world_map.is_some());
 
@@ -620,15 +623,16 @@ pub fn show(
         callback: Arc::new(callback),
     });
 
-    if let Some(wm) = world_map.filter(|_| is_outdoor && !is_underworld) {
-        let overlay = OverworldOverlayOptions {
+    if let Some(wm) = world_map.filter(|_| is_outdoor) {
+        let overlay = OutdoorOverlayOptions {
+            z: map.z,
             cx,
             cy,
             grid_dims: (grid_dims.0 as usize, grid_dims.1 as usize),
             show_labels: state.show_labels,
             label_filters: state.label_filters,
         };
-        paint_overworld_overlay(
+        paint_outdoor_overlay(
             ui,
             map_rect,
             wm,
@@ -740,16 +744,20 @@ fn render_minimap_header(
             }
         });
 
-        if is_outdoor && !is_underworld && world_map_loaded {
+        if is_outdoor && world_map_loaded {
             ui.horizontal_wrapped(|ui| {
                 ui.checkbox(&mut state.show_labels, "Labels");
                 ui.add_enabled_ui(state.show_labels, |ui| {
-                    ui.checkbox(&mut state.label_filters.towns, "Towns");
-                    ui.checkbox(&mut state.label_filters.dwellings, "Dwellings");
-                    ui.checkbox(&mut state.label_filters.castles, "Castles");
-                    ui.checkbox(&mut state.label_filters.keeps, "Keeps");
-                    ui.checkbox(&mut state.label_filters.dungeons, "Dungeons");
-                    ui.checkbox(&mut state.label_filters.shrines, "Shrines");
+                    if is_underworld {
+                        ui.checkbox(&mut state.label_filters.landmarks, "Landmarks");
+                    } else {
+                        ui.checkbox(&mut state.label_filters.towns, "Towns");
+                        ui.checkbox(&mut state.label_filters.dwellings, "Dwellings");
+                        ui.checkbox(&mut state.label_filters.castles, "Castles");
+                        ui.checkbox(&mut state.label_filters.keeps, "Keeps");
+                        ui.checkbox(&mut state.label_filters.dungeons, "Dungeons");
+                        ui.checkbox(&mut state.label_filters.shrines, "Shrines");
+                    }
                 });
             });
         }
@@ -1881,16 +1889,16 @@ struct VisibleWorldLocation<'a> {
     distance_sq: i32,
 }
 
-/// Paint markers and optional labels for visible overworld points of interest.
-fn paint_overworld_overlay(
+/// Paint markers and optional labels for visible outdoor points of interest.
+fn paint_outdoor_overlay(
     ui: &egui::Ui,
     rect: Rect,
     world_map: &WorldMap,
-    overlay: OverworldOverlayOptions,
+    overlay: OutdoorOverlayOptions,
     fog_visibility: Option<&[u8]>,
 ) {
     let mut visible = visible_world_locations(
-        world_map.locations(),
+        world_map.locations(overlay.z),
         rect,
         overlay.cx,
         overlay.cy,
@@ -1910,7 +1918,7 @@ fn paint_overworld_overlay(
 
     let painter = ui.painter_at(rect);
     for entry in &visible {
-        if !is_overworld_location_revealed(entry.location, overlay, fog_visibility) {
+        if !is_outdoor_location_revealed(entry.location, overlay, fog_visibility) {
             continue;
         }
         let fill = world_marker_color(entry.location.category());
@@ -1931,7 +1939,7 @@ fn paint_overworld_overlay(
     let mut occupied = Vec::new();
 
     for entry in &visible {
-        if !is_overworld_location_revealed(entry.location, overlay, fog_visibility) {
+        if !is_outdoor_location_revealed(entry.location, overlay, fog_visibility) {
             continue;
         }
         if !overlay.label_filters.shows(entry.location.category()) {
@@ -1957,9 +1965,9 @@ fn paint_overworld_overlay(
     }
 }
 
-fn is_overworld_location_revealed(
+fn is_outdoor_location_revealed(
     location: &WorldLocation,
-    overlay: OverworldOverlayOptions,
+    overlay: OutdoorOverlayOptions,
     fog_visibility: Option<&[u8]>,
 ) -> bool {
     let Some(fog_visibility) = fog_visibility else {
@@ -2097,7 +2105,7 @@ fn player_marker_style(tile_span_px: f32) -> PlayerMarkerStyle {
     }
 }
 
-/// Return the visible overworld locations after applying world-wrap projection.
+/// Return the visible outdoor locations after applying world-wrap projection.
 fn visible_world_locations<'a>(
     locations: &'a [WorldLocation],
     rect: Rect,
@@ -2174,14 +2182,15 @@ fn wrapped_delta(coord: u8, center: u8) -> i16 {
 fn world_label_priority(category: WorldLabelCategory) -> u8 {
     match category {
         WorldLabelCategory::Shrine => 0,
-        WorldLabelCategory::Town => 1,
-        WorldLabelCategory::Castle | WorldLabelCategory::Keep => 2,
-        WorldLabelCategory::Dungeon => 3,
-        WorldLabelCategory::Dwelling => 4,
+        WorldLabelCategory::Landmark => 1,
+        WorldLabelCategory::Town => 2,
+        WorldLabelCategory::Castle | WorldLabelCategory::Keep => 3,
+        WorldLabelCategory::Dungeon => 4,
+        WorldLabelCategory::Dwelling => 5,
     }
 }
 
-/// Pick a marker color for each overworld location category.
+/// Pick a marker color for each outdoor location category.
 fn world_marker_color(category: WorldLabelCategory) -> Color32 {
     match category {
         WorldLabelCategory::Town => Color32::from_rgb(240, 212, 106),
@@ -2189,6 +2198,7 @@ fn world_marker_color(category: WorldLabelCategory) -> Color32 {
         WorldLabelCategory::Castle | WorldLabelCategory::Keep => Color32::from_rgb(127, 169, 255),
         WorldLabelCategory::Dungeon => Color32::from_rgb(226, 110, 110),
         WorldLabelCategory::Shrine => Color32::from_rgb(120, 224, 224),
+        WorldLabelCategory::Landmark => Color32::from_rgb(242, 182, 92),
     }
 }
 
@@ -2305,6 +2315,7 @@ mod tests {
 
         assert!(filters.shows(WorldLabelCategory::Town));
         assert!(!filters.shows(WorldLabelCategory::Shrine));
+        assert!(filters.shows(WorldLabelCategory::Landmark));
     }
 
     #[test]
@@ -2317,6 +2328,18 @@ mod tests {
 
         assert_eq!(shrine.category(), WorldLabelCategory::Shrine);
         assert_eq!(shrine.name(), "Honor");
+    }
+
+    #[test]
+    fn landmark_points_report_landmark_category() {
+        let landmark = WorldLocation {
+            kind: WorldLabelKind::Landmark("Doom"),
+            x: 0x70,
+            y: 0x70,
+        };
+
+        assert_eq!(landmark.category(), WorldLabelCategory::Landmark);
+        assert_eq!(landmark.name(), "Doom");
     }
 
     #[test]

@@ -28,6 +28,7 @@ pub enum WorldLabelCategory {
     Keep,
     Dungeon,
     Shrine,
+    Landmark,
 }
 
 /// Semantic type of a parsed overworld label entry.
@@ -35,6 +36,7 @@ pub enum WorldLabelCategory {
 pub enum WorldLabelKind {
     Location(LocationType),
     Shrine(Virtue),
+    Landmark(&'static str),
 }
 
 /// A named overworld entrance read from DATA.OVL.
@@ -54,6 +56,7 @@ impl WorldLocation {
         match self.kind {
             WorldLabelKind::Location(location) => location.name(),
             WorldLabelKind::Shrine(virtue) => virtue.name(),
+            WorldLabelKind::Landmark(name) => name,
         }
     }
 
@@ -72,15 +75,61 @@ impl WorldLocation {
                 }
             },
             WorldLabelKind::Shrine(_) => WorldLabelCategory::Shrine,
+            WorldLabelKind::Landmark(_) => WorldLabelCategory::Landmark,
         }
     }
 }
+
+// These underworld landmarks come from the numbered cluebook map and
+// corroborating coordinate lists in community walkthroughs. Unlike the
+// Britannia labels, Ultima V does not expose a dedicated underworld POI table
+// in DATA.OVL, so we keep the fixed objective landmarks as one static table.
+//
+// The trailing comments preserve the source sextant pairs from the guide data,
+// with the first pair being latitude (y) and the second being longitude (x).
+const UNDERWORLD_LANDMARKS: [WorldLocation; 7] = [
+    WorldLocation {
+        kind: WorldLabelKind::Landmark("Ararat"),
+        x: 0x22, // CC
+        y: 0x29, // CJ
+    },
+    WorldLocation {
+        kind: WorldLabelKind::Landmark("Doom"),
+        x: 0x70, // HA
+        y: 0x70, // HA
+    },
+    WorldLocation {
+        kind: WorldLabelKind::Landmark("Shard of Hatred"),
+        x: 0x82, // IC
+        y: 0x41, // EB
+    },
+    WorldLocation {
+        kind: WorldLabelKind::Landmark("Shard of Falsehood"),
+        x: 0xC0, // MA
+        y: 0x50, // FA
+    },
+    WorldLocation {
+        kind: WorldLabelKind::Landmark("Shard of Cowardice"),
+        x: 0xB8, // LI
+        y: 0xB0, // LA
+    },
+    WorldLocation {
+        kind: WorldLabelKind::Landmark("Amulet"),
+        x: 0x63, // GD
+        y: 0xE4, // OE
+    },
+    WorldLocation {
+        kind: WorldLabelKind::Landmark("Mystic Arms"),
+        x: 0xD5, // NF
+        y: 0xEB, // OL
+    },
+];
 
 /// The full 256x256 outdoor tile grids, loaded from BRIT.DAT and UNDER.DAT.
 pub struct WorldMap {
     britannia_tiles: Box<[u8; OUTDOOR_MAP_LEN]>,
     underworld_tiles: Box<[u8; OUTDOOR_MAP_LEN]>,
-    locations: Vec<WorldLocation>,
+    overworld_locations: Vec<WorldLocation>,
 }
 
 impl WorldMap {
@@ -108,8 +157,8 @@ impl WorldMap {
             .with_context(|| format!("failed to read {}", under_path.display()))?;
 
         let mut map = Self::from_raw(chunk_flags, &brit, &under)?;
-        map.locations = locations;
-        map.locations.extend(shrines);
+        map.overworld_locations = locations;
+        map.overworld_locations.extend(shrines);
         Ok(map)
     }
 
@@ -126,7 +175,7 @@ impl WorldMap {
         Ok(Self {
             britannia_tiles,
             underworld_tiles,
-            locations: Vec::new(),
+            overworld_locations: Vec::new(),
         })
     }
 
@@ -140,9 +189,13 @@ impl WorldMap {
         tiles[y as usize * 256 + x as usize]
     }
 
-    /// Return all parsed overworld label points from DATA.OVL.
-    pub fn locations(&self) -> &[WorldLocation] {
-        &self.locations
+    /// Return the fixed POI set for the active outdoor world.
+    pub fn locations(&self, z: u8) -> &[WorldLocation] {
+        if is_underworld_z(z) {
+            &UNDERWORLD_LANDMARKS
+        } else {
+            &self.overworld_locations
+        }
     }
 }
 
@@ -407,6 +460,30 @@ mod tests {
                 kind: WorldLabelKind::Shrine(Virtue::Humility),
                 x: 231,
                 y: 216,
+            }
+        );
+    }
+
+    #[test]
+    fn world_map_returns_underworld_landmarks_for_underworld_z() {
+        let map = WorldMap {
+            britannia_tiles: Box::new([0; OUTDOOR_MAP_LEN]),
+            underworld_tiles: Box::new([0; OUTDOOR_MAP_LEN]),
+            overworld_locations: vec![WorldLocation {
+                kind: WorldLabelKind::Location(LocationType::Town(1)),
+                x: 81,
+                y: 106,
+            }],
+        };
+
+        assert_eq!(map.locations(0).len(), 1);
+        assert_eq!(map.locations(0xFF)[0].name(), "Ararat");
+        assert_eq!(
+            map.locations(0xFF)[1],
+            WorldLocation {
+                kind: WorldLabelKind::Landmark("Doom"),
+                x: 0x70,
+                y: 0x70,
             }
         );
     }
