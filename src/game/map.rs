@@ -41,6 +41,16 @@ impl CardinalDirection {
             _ => None,
         }
     }
+
+    /// Human-readable name for the direction (e.g. "North").
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::North => "North",
+            Self::East => "East",
+            Self::South => "South",
+            Self::West => "West",
+        }
+    }
 }
 
 /// Which type of location the party is currently in.
@@ -398,6 +408,20 @@ pub fn read_map_state_with_visibility_snapshot(
         visibility_tiles,
         objects,
     })
+}
+
+/// Overwrite the party position bytes (X, Y, Z) in game memory.
+///
+/// Writes only the three coordinate bytes at [`MAP_X`], [`MAP_Y`], and
+/// [`MAP_Z`]; the location id, transport, scroll origin, and tile/object
+/// buffers are left untouched. Crossing between scene types (e.g. overworld
+/// to town) requires the engine to load matching tile and object data and is
+/// not attempted here.
+pub fn write_position(mem: &dyn MemoryAccess, dos_base: usize, x: u8, y: u8, z: u8) -> Result<()> {
+    mem.write_u8(inv_addr(dos_base, MAP_X), x)?;
+    mem.write_u8(inv_addr(dos_base, MAP_Y), y)?;
+    mem.write_u8(inv_addr(dos_base, MAP_Z), z)?;
+    Ok(())
 }
 
 /// Read the current 11x11 visibility window.
@@ -797,6 +821,32 @@ mod tests {
             0xA0 | (VIEWPORT_VISIBILITY_WIDTH as u8 - 1)
         );
         assert!(state.objects.is_empty()); // no objects written
+    }
+
+    #[test]
+    fn write_position_updates_coords_and_leaves_neighbors_alone() {
+        let mock = MockMemory::new(0x30000);
+        let base = SAVE_BASE;
+        mock.write_u8(base + MAP_LOCATION, 5).unwrap();
+        mock.write_u8(base + MAP_TRANSPORT, 7).unwrap();
+        mock.write_u8(base + MAP_X, 10).unwrap();
+        mock.write_u8(base + MAP_Y, 20).unwrap();
+        mock.write_u8(base + MAP_Z, 30).unwrap();
+
+        write_position(&mock, 0, 200, 150, 0xFF).unwrap();
+
+        let mut buf = [0u8; 1];
+        mock.read_bytes(base + MAP_X, &mut buf).unwrap();
+        assert_eq!(buf[0], 200);
+        mock.read_bytes(base + MAP_Y, &mut buf).unwrap();
+        assert_eq!(buf[0], 150);
+        mock.read_bytes(base + MAP_Z, &mut buf).unwrap();
+        assert_eq!(buf[0], 0xFF);
+
+        mock.read_bytes(base + MAP_LOCATION, &mut buf).unwrap();
+        assert_eq!(buf[0], 5);
+        mock.read_bytes(base + MAP_TRANSPORT, &mut buf).unwrap();
+        assert_eq!(buf[0], 7);
     }
 
     #[test]
@@ -1204,6 +1254,14 @@ mod tests {
             Some(CardinalDirection::West)
         );
         assert_eq!(CardinalDirection::from_dungeon_byte(4), None);
+    }
+
+    #[test]
+    fn cardinal_direction_names_match_compass_points() {
+        assert_eq!(CardinalDirection::North.name(), "North");
+        assert_eq!(CardinalDirection::East.name(), "East");
+        assert_eq!(CardinalDirection::South.name(), "South");
+        assert_eq!(CardinalDirection::West.name(), "West");
     }
 
     #[test]
