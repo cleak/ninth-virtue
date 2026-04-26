@@ -866,6 +866,13 @@ impl eframe::App for UltimaCompanion {
 
             ui.add_space(4.0);
 
+            gui::section_frame(ui).show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                game_written |= gui::location_panel::show(ui, minimap.map.as_mut(), mem);
+            });
+
+            ui.add_space(4.0);
+
             ui.columns(4, |cols| {
                 gui::section_frame(&cols[0]).show(&mut cols[0], |ui| {
                     ui.set_min_width(ui.available_width());
