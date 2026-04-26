@@ -80,50 +80,49 @@ impl WorldLocation {
     }
 }
 
-// These underworld landmarks come from the numbered cluebook map and
-// corroborating coordinate lists in community walkthroughs. Unlike the
-// Britannia labels, Ultima V does not expose a dedicated underworld POI table
-// in DATA.OVL, so we keep the fixed objective landmarks as one static table.
+// These underworld landmarks come from the numbered underworld map/key in
+// Origin Systems' Paths of Destiny cluebook, mirrored at
+// https://geocities.bootstrike.com/Dungeons%20of%20Destiny/underwld.htm and
+// indexed at https://geocities.bootstrike.com/Dungeons%20of%20Destiny/ult5maps.htm
+// as maps taken from Paths of Destiny. The sextant pairs below are from
+// https://stcarchiv.de/tos/1990/06/tips-zu-ultima-5, which lists Mystic Arms
+// OL NF, Ararat CJ CC, Amulet OE GD, the shards FA MA / LA LI / EB IC, and
+// Doom HA HA. Unlike the Britannia labels, Ultima V does not expose a dedicated
+// underworld POI table in DATA.OVL, so we keep the fixed objective landmarks as
+// one static table.
 //
-// The trailing comments preserve the source sextant pairs from the guide data,
-// with the first pair being latitude (y) and the second being longitude (x).
+// Entries preserve the source sextant order from the guide data: latitude (y)
+// first, then longitude (x). Underworld clue coordinates name 16x16 sextant
+// bands relative to the displayed underworld chart, whose first band maps one
+// chunk after the raw map origin. Extraction formula: for each two-letter pair,
+// tile = ((first_letter - 'A' + 1) * 16 + (second_letter - 'A')) mod 256.
 const UNDERWORLD_LANDMARKS: [WorldLocation; 7] = [
-    WorldLocation {
-        kind: WorldLabelKind::Landmark("Ararat"),
-        x: 0x22, // CC
-        y: 0x29, // CJ
-    },
-    WorldLocation {
-        kind: WorldLabelKind::Landmark("Doom"),
-        x: 0x70, // HA
-        y: 0x70, // HA
-    },
-    WorldLocation {
-        kind: WorldLabelKind::Landmark("Shard of Hatred"),
-        x: 0x82, // IC
-        y: 0x41, // EB
-    },
-    WorldLocation {
-        kind: WorldLabelKind::Landmark("Shard of Falsehood"),
-        x: 0xC0, // MA
-        y: 0x50, // FA
-    },
-    WorldLocation {
-        kind: WorldLabelKind::Landmark("Shard of Cowardice"),
-        x: 0xB8, // LI
-        y: 0xB0, // LA
-    },
-    WorldLocation {
-        kind: WorldLabelKind::Landmark("Amulet"),
-        x: 0x63, // GD
-        y: 0xE4, // OE
-    },
-    WorldLocation {
-        kind: WorldLabelKind::Landmark("Mystic Arms"),
-        x: 0xD5, // NF
-        y: 0xEB, // OL
-    },
+    underworld_landmark("Ararat", b"CJ", b"CC"),
+    underworld_landmark("Doom", b"HA", b"HA"),
+    underworld_landmark("Shard of Hatred", b"EB", b"IC"),
+    underworld_landmark("Shard of Falsehood", b"FA", b"MA"),
+    underworld_landmark("Shard of Cowardice", b"LA", b"LI"),
+    underworld_landmark("Amulet", b"OE", b"GD"),
+    underworld_landmark("Mystic Arms", b"OL", b"NF"),
 ];
+
+const fn underworld_landmark(
+    name: &'static str,
+    latitude: &[u8; 2],
+    longitude: &[u8; 2],
+) -> WorldLocation {
+    WorldLocation {
+        kind: WorldLabelKind::Landmark(name),
+        x: underworld_sextant_coord(longitude),
+        y: underworld_sextant_coord(latitude),
+    }
+}
+
+const fn underworld_sextant_coord(pair: &[u8; 2]) -> u8 {
+    let high = (pair[0] - b'A' + 1) as u16;
+    let low = (pair[1] - b'A') as u16;
+    ((high * 16 + low) & 0xFF) as u8
+}
 
 /// The full 256x256 outdoor tile grids, loaded from BRIT.DAT and UNDER.DAT.
 pub struct WorldMap {
@@ -465,6 +464,15 @@ mod tests {
     }
 
     #[test]
+    fn underworld_sextant_coordinates_are_chunk_shifted() {
+        assert_eq!(underworld_sextant_coord(b"CC"), 0x32);
+        assert_eq!(underworld_sextant_coord(b"CJ"), 0x39);
+        assert_eq!(underworld_sextant_coord(b"HA"), 0x80);
+        assert_eq!(underworld_sextant_coord(b"NF"), 0xE5);
+        assert_eq!(underworld_sextant_coord(b"OL"), 0xFB);
+    }
+
+    #[test]
     fn world_map_returns_underworld_landmarks_for_underworld_z() {
         let map = WorldMap {
             britannia_tiles: Box::new([0; OUTDOOR_MAP_LEN]),
@@ -482,8 +490,16 @@ mod tests {
             map.locations(0xFF)[1],
             WorldLocation {
                 kind: WorldLabelKind::Landmark("Doom"),
-                x: 0x70,
-                y: 0x70,
+                x: 0x80,
+                y: 0x80,
+            }
+        );
+        assert_eq!(
+            map.locations(0xFF)[6],
+            WorldLocation {
+                kind: WorldLabelKind::Landmark("Mystic Arms"),
+                x: 0xE5,
+                y: 0xFB,
             }
         );
     }
