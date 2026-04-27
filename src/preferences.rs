@@ -210,10 +210,18 @@ fn load_audio_preferences_from_path(path: &Path) -> AudioPreferences {
 }
 
 fn save_audio_preferences_to_path(path: &Path, prefs: &AudioPreferences) {
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+    if let Some(parent) = path.parent()
+        && let Err(e) = fs::create_dir_all(parent)
+    {
+        eprintln!(
+            "failed to create audio prefs directory {}: {e}",
+            parent.display()
+        );
+        return;
     }
-    let _ = fs::write(path, prefs.serialize());
+    if let Err(e) = fs::write(path, prefs.serialize()) {
+        eprintln!("failed to write audio prefs to {}: {e}", path.display());
+    }
 }
 
 pub(crate) fn appdata_file_path(file_name: &str) -> Option<PathBuf> {
