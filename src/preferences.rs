@@ -303,6 +303,22 @@ mod tests {
         cleanup_temp_pref_path(&path);
     }
 
+    #[test]
+    fn audio_invalid_entries_fall_back_to_defaults() {
+        let path = temp_audio_pref_path();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "mute_on_lost_focus=maybe\nuser_muted=yes\nunknown_key=true\nno_equals\n",
+        )
+        .unwrap();
+
+        let prefs = load_audio_preferences_from_path(&path);
+        assert_eq!(prefs, AudioPreferences::default());
+
+        cleanup_temp_pref_path(&path);
+    }
+
     fn temp_pref_path() -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
