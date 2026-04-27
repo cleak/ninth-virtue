@@ -5,6 +5,7 @@ use crate::game::character::PartyLocks;
 use crate::game::inventory::InventoryLocks;
 
 const LOCK_PREFS_FILE: &str = "lock_preferences.txt";
+const AUDIO_PREFS_FILE: &str = "audio_preferences.txt";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LockPreferences {
@@ -105,6 +106,63 @@ pub fn save_lock_preferences(party: &PartyLocks, inventory: &InventoryLocks) {
     save_lock_preferences_to_path(&path, &prefs);
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AudioPreferences {
+    pub mute_on_lost_focus: bool,
+    /// The user's last explicit mute choice. Acts as the source of truth for
+    /// whether the game should be muted, surviving DOSBox restarts and
+    /// overriding any per-application mute state Windows persists for the
+    /// process. Auto-mute (focus loss) does not modify this field.
+    pub user_muted: bool,
+}
+
+impl AudioPreferences {
+    fn parse(contents: &str) -> Self {
+        let mut prefs = Self::default();
+        for line in contents.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            let Some(value) = parse_bool(value) else {
+                continue;
+            };
+            match key.trim() {
+                "mute_on_lost_focus" => prefs.mute_on_lost_focus = value,
+                "user_muted" => prefs.user_muted = value,
+                _ => {}
+            }
+        }
+        prefs
+    }
+
+    fn serialize(&self) -> String {
+        let mut output = String::from("mute_on_lost_focus=");
+        output.push_str(bool_as_str(self.mute_on_lost_focus));
+        output.push('\n');
+        output.push_str("user_muted=");
+        output.push_str(bool_as_str(self.user_muted));
+        output.push('\n');
+        output
+    }
+}
+
+pub fn load_audio_preferences() -> AudioPreferences {
+    audio_prefs_path()
+        .map(|path| load_audio_preferences_from_path(&path))
+        .unwrap_or_default()
+}
+
+pub fn save_audio_preferences(prefs: &AudioPreferences) {
+    let Some(path) = audio_prefs_path() else {
+        return;
+    };
+    save_audio_preferences_to_path(&path, prefs);
+}
+
 fn parse_bool(value: &str) -> Option<bool> {
     match value.trim() {
         "true" => Some(true),
@@ -126,6 +184,10 @@ fn lock_prefs_path() -> Option<PathBuf> {
     appdata_file_path(LOCK_PREFS_FILE)
 }
 
+fn audio_prefs_path() -> Option<PathBuf> {
+    appdata_file_path(AUDIO_PREFS_FILE)
+}
+
 fn load_lock_preferences_from_path(path: &Path) -> LockPreferences {
     fs::read_to_string(path)
         .ok()
@@ -138,6 +200,28 @@ fn save_lock_preferences_to_path(path: &Path, prefs: &LockPreferences) {
         let _ = fs::create_dir_all(parent);
     }
     let _ = fs::write(path, prefs.serialize());
+}
+
+fn load_audio_preferences_from_path(path: &Path) -> AudioPreferences {
+    fs::read_to_string(path)
+        .ok()
+        .map(|contents| AudioPreferences::parse(&contents))
+        .unwrap_or_default()
+}
+
+fn save_audio_preferences_to_path(path: &Path, prefs: &AudioPreferences) {
+    if let Some(parent) = path.parent()
+        && let Err(e) = fs::create_dir_all(parent)
+    {
+        eprintln!(
+            "failed to create audio prefs directory {}: {e}",
+            parent.display()
+        );
+        return;
+    }
+    if let Err(e) = fs::write(path, prefs.serialize()) {
+        eprintln!("failed to write audio prefs to {}: {e}", path.display());
+    }
 }
 
 pub(crate) fn appdata_file_path(file_name: &str) -> Option<PathBuf> {
@@ -211,6 +295,38 @@ mod tests {
         cleanup_temp_pref_path(&path);
     }
 
+    #[test]
+    fn audio_preferences_round_trip_through_disk() {
+        let path = temp_audio_pref_path();
+
+        let prefs = AudioPreferences {
+            mute_on_lost_focus: true,
+            user_muted: true,
+        };
+        save_audio_preferences_to_path(&path, &prefs);
+
+        let loaded = load_audio_preferences_from_path(&path);
+        assert_eq!(loaded, prefs);
+
+        cleanup_temp_pref_path(&path);
+    }
+
+    #[test]
+    fn audio_invalid_entries_fall_back_to_defaults() {
+        let path = temp_audio_pref_path();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "mute_on_lost_focus=maybe\nuser_muted=yes\nunknown_key=true\nno_equals\n",
+        )
+        .unwrap();
+
+        let prefs = load_audio_preferences_from_path(&path);
+        assert_eq!(prefs, AudioPreferences::default());
+
+        cleanup_temp_pref_path(&path);
+    }
+
     fn temp_pref_path() -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -219,6 +335,16 @@ mod tests {
         std::env::temp_dir()
             .join(format!("ninth-virtue-lock-prefs-{unique}"))
             .join(LOCK_PREFS_FILE)
+    }
+
+    fn temp_audio_pref_path() -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!("ninth-virtue-audio-prefs-{unique}"))
+            .join(AUDIO_PREFS_FILE)
     }
 
     fn cleanup_temp_pref_path(path: &Path) {

@@ -27,6 +27,7 @@ use crate::memory::process::{self, DosBoxProcess};
 use crate::memory::scanner;
 use crate::preferences;
 use crate::tiles::atlas::TileAtlas;
+use crate::window_focus;
 use windows::Win32::Foundation::HANDLE;
 
 pub struct AttachedProcess {
@@ -42,6 +43,9 @@ const PROCESS_SCAN_INTERVAL: Duration = Duration::from_secs(2);
 const RESCAN_INTERVAL: Duration = Duration::from_secs(2);
 /// Keep lock-only polling responsive without forcing full-speed auto-refresh.
 const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// Cadence for re-checking the foreground window when "mute on lost focus" is
+/// enabled. 250 ms feels instantaneous to the user without burning cycles.
+const FOCUS_CHECK_INTERVAL: Duration = Duration::from_millis(250);
 const DEFAULT_REFRESH_INTERVAL_SECS: f32 = 0.2;
 const SAVE_SNAPSHOT_LEN: usize = MAP_TILES + MAP_TILES_LEN;
 const VIEWPORT_SNAPSHOT_LEN: usize = VIEWPORT_VISIBILITY_HEIGHT * VIEWPORT_VISIBILITY_STRIDE;
@@ -88,7 +92,18 @@ pub struct UltimaCompanion {
     // Audio volume control (WASAPI)
     audio_session: Option<AudioSession>,
     audio_volume: f32,
+    /// Mirrors the current WASAPI mute state. May reflect either user intent
+    /// or an active auto-mute.
     audio_muted: bool,
+    audio_mute_on_lost_focus: bool,
+    /// The user's persisted mute intent. Source of truth for whether the
+    /// game should be muted in the absence of focus-driven auto-mute.
+    /// Updated only by user clicks on the mute button.
+    audio_user_muted: bool,
+    /// True when our auto-mute logic muted the session (so we can release it
+    /// when the game window regains focus). A user-initiated mute leaves this
+    /// false, so we never auto-unmute their explicit choice.
+    audio_auto_muted: bool,
 }
 
 struct CachedGameStateRefs<'a> {
@@ -105,6 +120,7 @@ struct CachedGameStateRefs<'a> {
 impl UltimaCompanion {
     pub fn new() -> Self {
         let persistent_locks = preferences::load_lock_preferences();
+        let audio_prefs = preferences::load_audio_preferences();
         let mut app = Self {
             process_list: Vec::new(),
             selected_pid: None,
@@ -132,7 +148,13 @@ impl UltimaCompanion {
             memory_watch: MemoryWatch::default(),
             audio_session: None,
             audio_volume: 1.0,
-            audio_muted: false,
+            // Pre-seed the WASAPI mirror with the persisted intent so the
+            // (disabled) mute button shows the right label before a session
+            // is acquired. try_acquire_audio resyncs once a session arrives.
+            audio_muted: audio_prefs.user_muted,
+            audio_mute_on_lost_focus: audio_prefs.mute_on_lost_focus,
+            audio_user_muted: audio_prefs.user_muted,
+            audio_auto_muted: false,
         };
         app.minimap.load_persistent_preferences();
         // Scan immediately on startup so we connect without delay.
@@ -216,6 +238,9 @@ impl UltimaCompanion {
             injection::remove_patch(&attached.process.memory, state);
         }
         self.patch_state = None;
+        // Release any auto-mute before swapping sessions so the prior process
+        // doesn't get stranded with a muted WASAPI session.
+        self.release_auto_mute();
         self.clear_attached_state("Connecting...");
     }
 
@@ -332,8 +357,45 @@ impl UltimaCompanion {
             injection::remove_patch(&attached.process.memory, state);
         }
         self.patch_state = None;
+        // Release any auto-mute before dropping the session, otherwise the
+        // OS-level WASAPI session stays muted after disconnect and the user
+        // has no way to unmute through our app.
+        self.release_auto_mute();
         self.clear_attached_state("Disconnected");
         self.suppress_auto_attach = true;
+    }
+
+    /// Apply `target` to the WASAPI session and update `audio_muted` on
+    /// success. Returns true when the session reflects `target` afterwards
+    /// (either because the call succeeded or because it was already there).
+    /// No-op (returns false) when no session is acquired.
+    fn set_session_mute(&mut self, target: bool) -> bool {
+        let Some(ref session) = self.audio_session else {
+            return false;
+        };
+        if self.audio_muted == target {
+            return true;
+        }
+        match session.set_mute(target) {
+            Ok(()) => {
+                self.audio_muted = target;
+                true
+            }
+            Err(e) => {
+                eprintln!("set_mute({target}) failed: {e}");
+                false
+            }
+        }
+    }
+
+    /// Undo any mute that was applied automatically by the focus tracker.
+    /// Manual user mutes (where `audio_auto_muted` is false) are preserved.
+    fn release_auto_mute(&mut self) {
+        if !self.audio_auto_muted {
+            return;
+        }
+        self.set_session_mute(false);
+        self.audio_auto_muted = false;
     }
 
     fn clear_attached_state(&mut self, status_msg: &str) {
@@ -350,6 +412,7 @@ impl UltimaCompanion {
         self.tile_atlas_error = None;
         self.world_map = None;
         self.audio_session = None;
+        self.audio_auto_muted = false;
         self.memory_watch.stop_recording();
         self.status_msg = status_msg.to_string();
     }
@@ -395,10 +458,16 @@ impl UltimaCompanion {
         }
         match AudioSession::find_for_pid(pid) {
             Ok(Some(session)) => {
-                // Read initial state from the OS mixer.
                 self.audio_volume = session.get_volume().unwrap_or(1.0);
+                // Windows persists per-application mute by exe path, so the
+                // OS-level state can be left over from auto-mute in a prior
+                // run. Treat our recorded user intent as authoritative and
+                // sync the session to it. The focus tracker layers auto-mute
+                // on top from the next tick onward.
                 self.audio_muted = session.get_mute().unwrap_or(false);
                 self.audio_session = Some(session);
+                self.audio_auto_muted = false;
+                self.set_session_mute(self.audio_user_muted);
             }
             Ok(None) => {} // No session yet; DOSBox may not be producing audio.
             Err(e) => eprintln!("Audio session lookup failed: {e}"),
@@ -408,6 +477,41 @@ impl UltimaCompanion {
     fn handle_process_death(&mut self) {
         self.patch_state = None; // Don't try to unpatch a dead process.
         self.clear_attached_state("Process terminated");
+    }
+
+    /// Drive the "mute on lost focus" feature. Inspects the OS foreground
+    /// window each tick and toggles the WASAPI mute flag accordingly.
+    ///
+    /// The `audio_auto_muted` latch records whether *we* applied the current
+    /// mute, so a user-initiated mute is never silently undone when the game
+    /// regains focus.
+    fn update_focus_based_mute(&mut self) {
+        // The latch is invariantly false when there is no session, so both
+        // early-bails just return.
+        let Some(pid) = self.attached.as_ref().map(|a| a.process.pid) else {
+            return;
+        };
+        if self.audio_session.is_none() {
+            return;
+        }
+
+        if !self.audio_mute_on_lost_focus {
+            self.release_auto_mute();
+            return;
+        }
+
+        let game_focused = window_focus::is_pid_foreground(pid);
+
+        if !game_focused {
+            if !self.audio_muted && self.set_session_mute(true) {
+                self.audio_auto_muted = true;
+            }
+        } else if self.audio_auto_muted {
+            // Game is focused — release whatever auto-mute we applied. If the
+            // user manually unmuted while we were muted, we still clear the
+            // latch so future manual mutes aren't treated as ours.
+            self.release_auto_mute();
+        }
     }
 
     fn rescan_memory(&mut self) {
@@ -764,6 +868,14 @@ impl eframe::App for UltimaCompanion {
             }
         }
 
+        // --- Auto-mute when game window loses focus ---
+        // Cheap (one Win32 call); safe to run every tick. Schedule a repaint
+        // so the check still fires when nothing else is driving the loop.
+        self.update_focus_based_mute();
+        if self.audio_mute_on_lost_focus && self.audio_session.is_some() {
+            ctx.request_repaint_after(FOCUS_CHECK_INTERVAL);
+        }
+
         // --- Memory watch polling (every frame while recording) ---
         if self.memory_watch.recording {
             if let Some(ref attached) = self.attached {
@@ -782,6 +894,8 @@ impl eframe::App for UltimaCompanion {
         let ctx = ui.ctx().clone();
         let previous_party_locks = self.party_locks.clone();
         let previous_inventory_locks = self.inventory_locks.clone();
+        let previous_mute_on_lost_focus = self.audio_mute_on_lost_focus;
+        let previous_user_muted = self.audio_user_muted;
 
         // --- Connection bar ---
         let mut conn_action = gui::connection_bar::ConnectionAction::None;
@@ -834,6 +948,8 @@ impl eframe::App for UltimaCompanion {
             audio_session,
             audio_volume,
             audio_muted,
+            audio_user_muted,
+            audio_mute_on_lost_focus,
             ..
         } = self;
 
@@ -888,7 +1004,14 @@ impl eframe::App for UltimaCompanion {
                     ui.set_min_width(ui.available_width());
                     game_written |= gui::actions_panel::show(ui, party, inventory, frigates, mem);
                     ui.add_space(8.0);
-                    gui::audio_panel::show(ui, audio_session, audio_volume, audio_muted);
+                    gui::audio_panel::show(
+                        ui,
+                        audio_session,
+                        audio_volume,
+                        audio_muted,
+                        audio_user_muted,
+                        audio_mute_on_lost_focus,
+                    );
                 });
                 gui::section_frame(&cols[3]).show(&mut cols[3], |ui| {
                     ui.set_min_width(ui.available_width());
@@ -923,6 +1046,15 @@ impl eframe::App for UltimaCompanion {
 
         if *party_locks != previous_party_locks || *inventory_locks != previous_inventory_locks {
             preferences::save_lock_preferences(party_locks, inventory_locks);
+        }
+
+        if *audio_mute_on_lost_focus != previous_mute_on_lost_focus
+            || *audio_user_muted != previous_user_muted
+        {
+            preferences::save_audio_preferences(&preferences::AudioPreferences {
+                mute_on_lost_focus: *audio_mute_on_lost_focus,
+                user_muted: *audio_user_muted,
+            });
         }
 
         // After all panels have run, trigger a single redraw if any
@@ -1047,6 +1179,9 @@ mod tests {
             audio_session: None,
             audio_volume: 1.0,
             audio_muted: false,
+            audio_mute_on_lost_focus: false,
+            audio_user_muted: false,
+            audio_auto_muted: false,
         }
     }
 

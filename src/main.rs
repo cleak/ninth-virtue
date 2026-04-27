@@ -9,6 +9,7 @@ mod preferences;
 #[cfg(test)]
 mod test_support;
 mod tiles;
+mod window_focus;
 
 fn main() -> eframe::Result {
     env_logger::init();

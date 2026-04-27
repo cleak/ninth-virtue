@@ -7,3 +7,4 @@ pub mod preferences;
 #[cfg(test)]
 mod test_support;
 pub mod tiles;
+pub mod window_focus;
