@@ -96,16 +96,21 @@ pub fn show(
     let has_party = !party.is_empty();
     let lock_row_height = ui.spacing().interact_size.y;
     let column_gap = ui.spacing().item_spacing.x;
-    // Keep the title span and trailing spacer derived from the same column
-    // widths as the party table so the MP/HP lock cells stay aligned.
+    // Match the title span to the same column widths used by the party table so
+    // the MP/HP lock cells line up with their column headers below.
     let lead_width = column_span_width(0, MP_COLUMN_INDEX, column_gap);
-    let trailing_width = column_span_width(HP_COLUMN_INDEX + 1, PARTY_COLUMNS.len(), column_gap);
+    let mp_width = column_width(MP_COLUMN_INDEX);
+    let hp_width = column_width(HP_COLUMN_INDEX);
 
     ui.horizontal(|ui| {
+        // `allocate_ui_with_layout` advances the parent cursor by the child's
+        // `min_rect`, not the requested size, so each cell calls `set_min_width`
+        // to consume the full column width and keep alignment with the headers.
         ui.allocate_ui_with_layout(
             egui::vec2(lead_width, lock_row_height),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
+                ui.set_min_width(lead_width);
                 ui.spacing_mut().item_spacing.x = 4.0;
                 ui.label(egui::RichText::new("\u{2694}").heading());
                 ui.label(
@@ -116,35 +121,33 @@ pub fn show(
             },
         );
 
-        ui.allocate_ui_with_layout(
-            egui::vec2(column_width(MP_COLUMN_INDEX), lock_row_height),
-            egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-            |ui| {
-                if has_party {
+        if has_party {
+            ui.allocate_ui_with_layout(
+                egui::vec2(mp_width, lock_row_height),
+                egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                |ui| {
+                    ui.set_min_width(mp_width);
                     crate::gui::infinity_checkbox(
                         ui,
                         &mut locks.mana,
                         "Lock mana at 99 for the whole party.",
                     );
-                }
-            },
-        );
+                },
+            );
 
-        ui.allocate_ui_with_layout(
-            egui::vec2(column_width(HP_COLUMN_INDEX), lock_row_height),
-            egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-            |ui| {
-                if has_party {
+            ui.allocate_ui_with_layout(
+                egui::vec2(hp_width, lock_row_height),
+                egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                |ui| {
+                    ui.set_min_width(hp_width);
                     crate::gui::infinity_checkbox(
                         ui,
                         &mut locks.health,
                         "Lock health at max and force Good status for the whole party.",
                     );
-                }
-            },
-        );
-
-        ui.allocate_ui(egui::vec2(trailing_width, lock_row_height), |_| {});
+                },
+            );
+        }
     });
 
     if !has_party {
