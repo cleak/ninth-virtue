@@ -480,7 +480,8 @@ impl UltimaCompanion {
     }
 
     /// Drive the "mute on lost focus" feature. Inspects the OS foreground
-    /// window each tick and toggles the WASAPI mute flag accordingly.
+    /// window and DOSBox mouse capture each tick, toggling the WASAPI mute
+    /// flag accordingly.
     ///
     /// The `audio_auto_muted` latch records whether *we* applied the current
     /// mute, so a user-initiated mute is never silently undone when the game
@@ -500,7 +501,7 @@ impl UltimaCompanion {
             return;
         }
 
-        let game_focused = window_focus::is_pid_foreground(pid);
+        let game_focused = window_focus::is_pid_foreground_with_captured_cursor(pid);
 
         if !game_focused {
             if !self.audio_muted && self.set_session_mute(true) {
