@@ -58,7 +58,7 @@ pub fn show(
         }
 
         ui.checkbox(mute_on_lost_focus, "Mute on lost focus")
-            .on_hover_text("Auto-mute the game when its window loses focus");
+            .on_hover_text("Auto-mute the game when its window loses focus or releases the mouse");
     });
 
     // Volume slider.
